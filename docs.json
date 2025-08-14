@@ -21,6 +21,7 @@
               "arduino-setup",
               "at-protocol",
               "esp32-c5-implementation",
+              "frame-data-protocol",
               "quickstart",
               "development"
             ]

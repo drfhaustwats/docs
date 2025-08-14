@@ -1,0 +1,422 @@
+---
+title: "Frame Data Protocol"
+description: "Deep dive into the 80MHz ParlIO→SPI frame protocol, data formats, and peripheral configurations"
+---
+
+# Frame Data Protocol
+
+The Frame Data Protocol is the high-speed communication backbone of the Watts v3 dual-MCU system, enabling synchronized LED control across ESP32-C5 and ESP32-H2 processors. This protocol achieves sub-millisecond coordination while maintaining data integrity through CRC validation.
+
+## Protocol Overview
+
+The frame protocol operates in three distinct phases:
+
+```
+Phase 1: Preparation    Phase 2: Data Transfer    Phase 3: Acknowledgment
+ESP32-C5 → ESP32-H2     ESP32-C5 → ESP32-H2       ESP32-H2 → ESP32-C5
+  AT+LED_PREP            80MHz ParlIO Stream         +LED_DONE URC
+  (UART 5Mbps)           (Channels 2-3 data)        (Status report)
+     ~1ms                     ~100µs                    ~10µs
+```
+
+## Frame Structure
+
+### Frame Header (8 bytes)
+
+```cpp
+typedef struct __attribute__((packed)) {
+    uint16_t magic;        // 0x4C45 ("LE" - Little Endian marker)
+    uint16_t ch2_pixels;   // Channel 2 pixel count (0-1000)
+    uint16_t ch3_pixels;   // Channel 3 pixel count (0-1000)  
+    uint16_t crc16;        // CRC16-CCITT of payload data
+} led_frame_header_t;
+```
+
+**Header Field Details:**
+- **Magic Number**: `0x4C45` provides frame synchronization and endianness validation
+- **Pixel Counts**: 16-bit values allow up to 1000 pixels per channel
+- **CRC16**: CCITT-FALSE polynomial (`0x1021`) with `0xFFFF` initialization
+
+### Frame Layout
+
+```
+Byte Position    Content                    Size
+─────────────────────────────────────────────────
+0-1             Magic (0x4C45)             2 bytes
+2-3             Channel 2 pixel count      2 bytes  
+4-5             Channel 3 pixel count      2 bytes
+6-7             CRC16 checksum             2 bytes
+8-X             Channel 2 pixel data       ch2_pixels × 4
+X+1-Y           Channel 3 pixel data       ch3_pixels × 4
+
+Maximum frame size: 8 + (1000 × 4) + (1000 × 4) = 8,008 bytes
+```
+
+### Pixel Data Format
+
+Each pixel uses 4 bytes in GRBW order (compatible with WS2812/SK6812):
+
+```cpp
+struct pixel_data {
+    uint8_t green;      // Green component (0-255)
+    uint8_t red;        // Red component (0-255)  
+    uint8_t blue;       // Blue component (0-255)
+    uint8_t white;      // White component (0-255, unused for WS2812)
+};
+```
+
+This format matches the native WS2812 bit order, eliminating the need for color reordering during RMT transmission.
+
+## 80MHz ParlIO → SPI Data Transfer
+
+### ParlIO TX Configuration (ESP32-C5)
+
+The ESP32-C5 uses ParlIO (Parallel I/O) in serial mode for high-speed data transmission:
+
+```cpp
+parlio_tx_unit_config_t config = {
+    .clk_src = PARLIO_CLK_SRC_DEFAULT,       // 80MHz APB clock source
+    .output_clk_freq_hz = 80000000,          // 80MHz output clock
+    .sample_edge = PARLIO_SAMPLE_EDGE_POS,   // Positive edge sampling
+    .bit_pack_order = PARLIO_BIT_PACK_ORDER_MSB, // MSB first
+    .data_width = 1,                         // 1-bit serial transmission
+    .idle_value = 0,                         // Idle low
+    .trans_queue_depth = 4,                  // 4 pending transactions
+    .max_transfer_size = 8008                // Maximum frame size
+};
+```
+
+**GPIO Assignments:**
+```cpp
+parlio_tx_gpio_config_t gpio_config = {
+    .clk_out_pin = GPIO_NUM_10,    // 80MHz clock to ESP32-H2
+    .valid_pin = GPIO_NUM_25,      // Frame valid signal (active high)
+    .data_pins = {GPIO_NUM_26}     // Serial data (WLED 3rd LED output)
+};
+```
+
+### ParlIO Timing Characteristics
+
+**Clock Generation:**
+- **Source**: 80MHz APB clock (PLL-derived)
+- **Output**: 80MHz square wave with ~50% duty cycle
+- **Jitter**: &lt;1ns RMS (crystal stability dependent)
+- **Edge Rate**: &lt;5ns rise/fall time
+
+**Data Timing:**
+- **Setup Time**: 6.25ns before clock rising edge
+- **Hold Time**: 6.25ns after clock rising edge  
+- **Valid Signal**: Asserted during entire frame transmission
+- **Idle Behavior**: Clock continues, data held low
+
+### SPI Slave Configuration (ESP32-H2)
+
+The ESP32-H2 receives the ParlIO stream via SPI slave interface:
+
+```cpp
+spi_bus_config_t buscfg = {
+    .mosi_io_num = GPIO_NUM_11,          // Data from C5 GPIO 26
+    .sclk_io_num = GPIO_NUM_10,          // Clock from C5 GPIO 10
+    .max_transfer_sz = 8008,             // Maximum frame size
+    .flags = SPICOMMON_BUSFLAG_MASTER |
+             SPICOMMON_BUSFLAG_SLAVE     // Dual-mode capability
+};
+
+spi_slave_interface_config_t slvcfg = {
+    .mode = 0,                           // CPOL=0, CPHA=0
+    .spics_io_num = GPIO_NUM_25,         // Valid/CS from C5 GPIO 25
+    .queue_size = 8,                     // 8 transaction queue depth
+    .flags = SPI_SLAVE_BIT_LSBFIRST      // LSB first reception
+};
+```
+
+**SPI Reception Strategy:**
+- **Pre-allocated Buffers**: 8 × 8KB DMA-capable buffers
+- **Circular Queuing**: Automatic re-queuing after processing
+- **Zero-Copy Operation**: Direct DMA to processing buffers
+- **Interrupt-Driven**: Minimal CPU overhead during reception
+
+## CRC Validation
+
+### CRC16-CCITT Implementation
+
+The protocol uses CRC16-CCITT with optimized lookup table implementation:
+
+```cpp
+// High-performance lookup table (256 entries)
+static const uint16_t crc16_table[256] = {
+    0x0000,0x1021,0x2042,0x3063,0x4084,0x50A5,0x60C6,0x70E7,
+    0x8108,0x9129,0xA14A,0xB16B,0xC18C,0xD1AD,0xE1CE,0xF1EF,
+    // ... remaining 240 entries
+};
+
+static uint16_t crc16_ccitt_lut(const uint8_t *data, size_t len) {
+    uint16_t crc = 0xFFFF;              // Initial value
+    while (len--) {
+        uint8_t idx = (crc >> 8) ^ *data++;
+        crc = (crc << 8) ^ crc16_table[idx];
+    }
+    return crc;
+}
+```
+
+**CRC Calculation Scope:**
+- **Included**: All pixel data (Channel 2 + Channel 3)
+- **Excluded**: Frame header (magic, pixel counts)
+- **Performance**: ~5µs for 1000 pixels using lookup table
+
+### Error Detection & Recovery
+
+**Validation Process:**
+1. **Frame Reception**: ESP32-H2 receives complete frame via SPI
+2. **Header Check**: Validate magic number and pixel counts
+3. **CRC Verification**: Recompute CRC over payload data
+4. **Comparison**: Compare computed CRC with header value
+
+**Error Response Protocol:**
+```cpp
+// Success path
+if (computed_crc == header_crc) {
+    process_frame_data();
+    send_at_response("+LED_DONE");
+}
+// Error path  
+else {
+    log_crc_error();
+    send_at_response("+LED_ERROR:CRC_MISMATCH");
+}
+```
+
+## Synchronization Timing
+
+### End-to-End Latency Analysis
+
+**Complete Frame Cycle:**
+```
+Event                           Timing      Cumulative
+─────────────────────────────────────────────────────
+AT+LED_PREP command            ~100µs       100µs
+H2 SPI slave preparation       ~50µs        150µs  
+ParlIO frame transmission      ~100µs       250µs
+H2 CRC validation              ~5µs         255µs
+H2 RMT channel setup          ~10µs         265µs
+RMT transmission start         ~5µs         270µs
++LED_DONE response            ~30µs         300µs
+
+Total coordination latency: ~300µs typical
+```
+
+**Frame Rate Capability:**
+- **Maximum Theoretical**: 3,333 FPS (300µs cycle time)
+- **Practical Limit**: 120 FPS (accounting for WLED processing)
+- **Recommended**: 60 FPS for optimal performance/power balance
+
+### Clock Domain Crossing
+
+**ParlIO to SPI Conversion:**
+The ParlIO output is electrically compatible with SPI input, but requires careful timing:
+
+```
+ParlIO (C5)           SPI Slave (H2)
+─────────────         ──────────────
+CLK_OUT (80MHz)   →   SCLK (80MHz)
+DATA (Serial)     →   MOSI (8-bit)
+VALID (Frame)     →   CS (Active Low)
+```
+
+**Critical Timing Requirements:**
+- **Clock Skew**: &lt;2ns between CLK and DATA signals
+- **Setup/Hold**: Meet SPI slave timing specifications
+- **CS Assertion**: Must precede data by &gt;50ns
+
+## Peripheral Configuration Deep Dive
+
+### ESP32-C5 RMT Configuration (Channels 0-1)
+
+**Local RMT Setup:**
+```cpp
+rmt_tx_channel_config_t tx_config = {
+    .clk_src = RMT_CLK_SRC_DEFAULT,        // 40MHz APB clock
+    .resolution_hz = 40000000,             // 40MHz = 25ns resolution
+    .mem_block_symbols = 48,               // 384 bytes per channel
+    .trans_queue_depth = 4,                // 4 pending transactions
+    .intr_priority = 3,                    // High interrupt priority
+    .flags.invert_out = false,             // Normal polarity
+    .flags.with_dma = true                 // Enable DMA
+};
+```
+
+**WS2812 Timing (40MHz Base):**
+```cpp
+// Timing specifications for WS2812 protocol
+rmt_bytes_encoder_config_t encoder_config = {
+    .bit0 = {
+        .duration0 = 16,    // T0H: 400ns (16 × 25ns)
+        .level0 = 1,        // High level
+        .duration1 = 34,    // T0L: 850ns (34 × 25ns)  
+        .level1 = 0         // Low level
+    },
+    .bit1 = {
+        .duration0 = 34,    // T1H: 850ns (34 × 25ns)
+        .level0 = 1,        // High level
+        .duration1 = 18,    // T1L: 450ns (18 × 25ns)
+        .level1 = 0         // Low level
+    },
+    .flags.msb_first = false  // LSB first for WS2812
+};
+```
+
+### ESP32-H2 RMT Configuration (Channels 2-3)
+
+**Remote RMT Setup:**
+```cpp
+rmt_tx_channel_config_t tx_config = {
+    .clk_src = RMT_CLK_SRC_DEFAULT,        // 32MHz APB clock
+    .resolution_hz = 32000000,             // 32MHz = 31.25ns resolution
+    .mem_block_symbols = 48,               // 384 bytes per channel
+    .trans_queue_depth = 8,                // 8 pending transactions
+    .intr_priority = 3,                    // High interrupt priority
+    .flags.invert_out = false              // Normal polarity
+};
+```
+
+**WS2812 Timing (32MHz Base):**
+```cpp
+// Adjusted timing for 32MHz clock
+rmt_bytes_encoder_config_t encoder_config = {
+    .bit0 = {
+        .duration0 = 10,    // T0H: 312.5ns (10 × 31.25ns) 
+        .level0 = 1,
+        .duration1 = 29,    // T0L: 906.25ns (29 × 31.25ns)
+        .level1 = 0
+    },
+    .bit1 = {
+        .duration0 = 29,    // T1H: 906.25ns (29 × 31.25ns)
+        .level0 = 1, 
+        .duration1 = 10,    // T1L: 312.5ns (10 × 31.25ns)
+        .level1 = 0
+    }
+};
+```
+
+**Clock Frequency Implications:**
+- **C5 (40MHz)**: ±12.5ns timing accuracy
+- **H2 (32MHz)**: ±15.625ns timing accuracy  
+- **WS2812 Tolerance**: ±150ns typical
+- **Impact**: Both configurations well within tolerance
+
+### Memory Architecture
+
+**Buffer Allocation Strategy:**
+
+```cpp
+// ESP32-C5 Memory Usage
+WLED pixel buffers:     8KB    (4 channels × 1000 pixels × 4 bytes ÷ 2)
+ParlIO frame buffer:    8KB    (DMA-capable, cache-aligned)
+RMT symbol buffers:     1.5KB  (2 channels × 48 symbols × 16 bytes)
+AT command buffers:     2KB    (UART RX/TX queues)
+Total C5 LED memory:   ~19.5KB
+
+// ESP32-H2 Memory Usage  
+SPI RX buffers:        64KB    (8 × 8KB circular buffer)
+RMT symbol buffers:   768B     (2 channels × 48 symbols × 8 bytes)
+Frame processing:      8KB     (working copy)
+AT response buffers:   1KB     (UART TX queue)
+Total H2 LED memory:  ~74KB
+```
+
+**DMA Requirements:**
+- **C5**: ParlIO and RMT require DMA-capable buffers (MALLOC_CAP_DMA)
+- **H2**: SPI slave uses automatic DMA with pre-allocated descriptors
+- **Cache Coherency**: ESP-IDF handles cache invalidation automatically
+- **Alignment**: 64-byte alignment recommended for optimal DMA performance
+
+## Performance Optimization
+
+### Throughput Calculations
+
+**ParlIO Bandwidth:**
+```
+Theoretical: 80 MHz × 1 bit = 80 Mbps = 10 MB/s
+Effective:   ~90% efficiency = 9 MB/s (protocol overhead)
+Frame size:  8008 bytes maximum
+Frame time:  8008 ÷ 9,000,000 = 890µs maximum
+Typical:     800 pixels = 3208 bytes = 356µs
+```
+
+**System Bottlenecks:**
+1. **AT Command Latency**: ~100µs (UART communication)
+2. **WLED Rendering**: Variable (effect complexity dependent)
+3. **Frame Validation**: ~5µs (CRC calculation)
+4. **RMT Setup**: ~15µs (encoder initialization)
+
+### CPU Utilization
+
+**ESP32-C5 Load (60 FPS, 1000 pixels):**
+- **WLED Effects**: 15-30% (effect dependent)
+- **Frame Creation**: 2% (memory copy + CRC)
+- **ParlIO Management**: &lt;1% (DMA-based)
+- **AT Commands**: &lt;1% (queued processing)
+- **Total**: 18-33% typical
+
+**ESP32-H2 Load (60 FPS, 1000 pixels):**
+- **SPI Reception**: &lt;1% (DMA-based)
+- **Frame Processing**: 3% (validation + splitting)
+- **RMT Transmission**: 5% (encoder overhead)  
+- **AT Processing**: &lt;1% (simple commands)
+- **BLE Stack**: 5-10% (connection dependent)
+- **Total**: 9-15% typical
+
+## Error Handling & Recovery
+
+### Communication Error Types
+
+**Frame-Level Errors:**
+- **Magic Mismatch**: Invalid frame header, frame discarded
+- **CRC Failure**: Data corruption detected, retry requested
+- **Size Overflow**: Frame exceeds buffer capacity, truncated
+- **Timeout**: Frame reception incomplete, partial frame discarded
+
+**System-Level Errors:**
+- **H2 Unresponsive**: AT command timeout, fallback to local mode
+- **SPI Hardware Fault**: Bus reset and reinitialization  
+- **RMT Channel Fault**: Channel reset and reconfiguration
+- **Memory Exhaustion**: Buffer allocation failure, reduced frame size
+
+### Recovery Mechanisms
+
+**Automatic Recovery:**
+```cpp
+// Error counter and recovery logic
+typedef struct {
+    uint32_t crc_errors;           // CRC validation failures
+    uint32_t timeout_errors;       // AT command timeouts  
+    uint32_t hardware_errors;      // SPI/RMT hardware faults
+    uint32_t consecutive_errors;   // Consecutive error count
+    bool fallback_mode;            // Emergency fallback active
+} error_counters_t;
+
+void handle_communication_error(error_type_t error) {
+    counters.consecutive_errors++;
+    
+    if (counters.consecutive_errors > MAX_CONSECUTIVE_ERRORS) {
+        ESP_LOGW(TAG, "Too many errors, enabling fallback mode");
+        counters.fallback_mode = true;
+        disable_h2_communication();
+    }
+    
+    // Attempt recovery every 10th error
+    if (counters.consecutive_errors % 10 == 0) {
+        attempt_h2_recovery();
+    }
+}
+```
+
+**Fallback Operation:**
+When ESP32-H2 communication fails, the system can operate in fallback mode:
+- **Channels 0-1**: Continue normal local RMT operation
+- **Channels 2-3**: Disabled or remapped to available local channels
+- **Performance**: Reduced to 2-channel operation
+- **Recovery**: Automatic retry every 30 seconds
+
+This comprehensive frame protocol ensures reliable, high-performance LED control across the distributed dual-MCU architecture while maintaining compatibility with standard WS2812/SK6812 LED strips.
