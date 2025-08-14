@@ -16,7 +16,7 @@
           {
             "group": "Getting started",
             "pages": [
-              "introduction",
+              "index",
               "hardware", 
               "arduino-setup",
               "at-protocol",

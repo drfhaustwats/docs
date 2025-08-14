@@ -11,13 +11,9 @@ LED control commands manage the high-speed coordination of LED frame data betwee
 
 Prepares the ESP32-H2 to receive LED frame data via SPI slave interface.
 
-<ParamField query="ch2_pixels" type="integer" required>
-  Number of pixels for LED channel 2 (0-1000)
-</ParamField>
-
-<ParamField query="ch3_pixels" type="integer" required>
-  Number of pixels for LED channel 3 (0-1000)
-</ParamField>
+**Parameters:**
+- `ch2_pixels` (integer, required): Number of pixels for LED channel 2 (0-1000)
+- `ch3_pixels` (integer, required): Number of pixels for LED channel 3 (0-1000)
 
 ### Request
 ```
@@ -67,21 +63,11 @@ AT+LED_STATS
 +LED_STATS:SPI,<state>,<frames_ok>,<frames_error>,<crc_errors>
 ```
 
-<ResponseField name="state" type="string">
-  Current LED controller state: IDLE, PREP, RECEIVING, PROCESSING
-</ResponseField>
-
-<ResponseField name="frames_ok" type="integer">
-  Total successfully processed frames since boot
-</ResponseField>
-
-<ResponseField name="frames_error" type="integer">
-  Total frames that failed processing
-</ResponseField>
-
-<ResponseField name="crc_errors" type="integer">
-  Total frames with CRC checksum errors
-</ResponseField>
+**Response Fields:**
+- `state` (string): Current LED controller state: IDLE, PREP, RECEIVING, PROCESSING
+- `frames_ok` (integer): Total successfully processed frames since boot
+- `frames_error` (integer): Total frames that failed processing
+- `crc_errors` (integer): Total frames with CRC checksum errors
 
 ### Example
 ```bash
@@ -150,9 +136,8 @@ Sent automatically when the ESP32-H2 completes processing a LED frame.
 +LED_DONE:<frame_id>
 ```
 
-<ResponseField name="frame_id" type="integer">
-  Frame sequence number for synchronization with ESP32-C5
-</ResponseField>
+**Response Fields:**
+- `frame_id` (integer): Frame sequence number for synchronization with ESP32-C5
 
 #### Example
 ```bash
@@ -175,17 +160,25 @@ The LED commands integrate automatically with the NeoPixelBus framework on ESP32
 
 ```cpp
 // NeoEsp32ParlC5SharedManager.h integration
-void IRAM_ATTR prepareLedFrame(uint16_t ch2_pixels, uint16_t ch3_pixels) {
+void _sendH2PrepCommand() {
+    uint16_t ch2_pixels = _channels[2].registered ? _channels[2].pixelCount : 0;
+    uint16_t ch3_pixels = _channels[3].registered ? _channels[3].pixelCount : 0;
+    
+    // Only send if pixel counts changed
+    if (ch2_pixels == _lastCh2 && ch3_pixels == _lastCh3) return;
+    _lastCh2 = ch2_pixels;
+    _lastCh3 = ch3_pixels;
+
     char cmd[64];
     snprintf(cmd, sizeof(cmd), "AT+LED_PREP=%d,%d", ch2_pixels, ch3_pixels);
-    
-    if (!ATHost_sendATWaitOK(cmd, 100)) {
-        // Handle preparation failure
-        return;
+
+    bool success = ATHost_sendATWaitOK(cmd, 1000); // 1000ms timeout
+    if (!success) {
+        ESP_LOGW(TAG, "Failed to send LED_PREP to H2");
+        _handleH2CommunicationError();
+    } else {
+        ESP_LOGD(TAG, "Sent LED_PREP to H2: ch2=%d, ch3=%d", ch2_pixels, ch3_pixels);
     }
-    
-    // Begin ParlIO transmission to H2
-    startParlIOTransmission();
 }
 ```
 

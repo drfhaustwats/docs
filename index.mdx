@@ -1,97 +1,72 @@
 ---
-title: "Introduction"
-description: "Welcome to the new home for your documentation"
+title: "Watts v3 controller"
+description: "Dual-MCU ESP32 outdoor lighting system with synchronized LED control across Wi-Fi and BLE interfaces"
 ---
 
-## Setting up
+# Dual-MCU ESP32 Outdoor Lighting System
 
-Get your documentation site up and running in minutes.
+This documentation covers the Watts v3 controller firmware architecture, designed as a high-performance dual-MCU outdoor lighting system with synchronized LED control and robust communication protocols.
 
-<Card
-  title="Start here"
-  icon="rocket"
-  href="/quickstart"
-  horizontal
->
-  Follow our three step quickstart guide.
-</Card>
+## System Architecture Overview
 
-## Make it yours
+The Watts v3 controller implements a sophisticated dual-MCU topology that separates concerns while maintaining tight synchronization:
 
-Design a docs site that looks great and empowers your users.
+```
++-------------------------------------------------------------+
+|                      ESP32-C5 (Main)                        |
+|  • WLED Effects Engine (Arduino component)                  |
+|  • Wi-Fi 2.4 / 5 GHz STA/AP                                 |
+|  • ParlIO TX 1-bit @ 80 MHz + VALID pin → pixel stream      |
+|  • RMT-TX Channel 0,1 → Local LED Strips                    |
+|  • AT-Host task over UART0                                  |
++-----------------------▲-------------------------------------+
+                        | 40 MHz ParlIO (DATA / CLK / VALID)
+                        | Frame-select header + Ch-2/3 pixels
++-----------------------▼-------------------------------------+
+|                      ESP32-H2 (Secondary)                   |
+|  • AT-Firmware Core (NimBLE + Parser)                       |
+|  • BLE 5.2 Peripheral                                       |
+|  • ParlIO/SPI-Slave DMA RX                                  |
+|  • RMT-TX Channel 2,3 → Remote LED Strips                   |
++-------------------------------------------------------------+
+```
 
-<Columns cols={2}>
-  <Card
-    title="Edit locally"
-    icon="pen-to-square"
-    href="/development"
-  >
-    Edit your docs locally and preview them in real time.
-  </Card>
-  <Card
-    title="Customize your site"
-    icon="palette"
-    href="/essentials/settings"
-  >
-    Customize the design and colors of your site to match your brand.
-  </Card>
-    <Card
-    title="Set up navigation"
-    icon="map"
-    href="/essentials/navigation"
-  >
-    Organize your docs to help users find what they need and succeed with your product.
-  </Card>
-  <Card
-    title="API documentation"
-    icon="terminal"
-    href="/api-reference/introduction"
-  >
-    Auto-generate API documentation from OpenAPI specifications.
-  </Card>
-</Columns>
+## MCU Role Separation
 
-## Create beautiful pages
+| Responsibility | ESP32-C5 (Main) | ESP32-H2 (Secondary) |
+|---|---|---|
+| **LED Channels** | Ch-0, Ch-1 (RMT-TX) | Ch-2, Ch-3 (RMT-TX) |
+| **Effects Engine** | WLED renders full RGB frame | Mirrors pixel data |
+| **Pixel Transport** | ParlIO TX, 80 MHz + VALID | ParlIO/SPI-Slave DMA RX |
+| **Network Stack** | Wi-Fi 2.4/5 GHz, mDNS, HTTP(S) OTA | BLE (GAP + GATT) |
+| **AT Protocol Role** | Master / Host | Slave / Device |
 
-Everything you need to create world-class documentation.
+## Key Features
 
-<Columns cols={2}>
-  <Card
-    title="Write with MDX"
-    icon="pen-fancy"
-    href="/essentials/markdown"
-  >
-    Use MDX to style your docs pages.
-  </Card>
-  <Card
-    title="Code samples"
-    icon="code"
-    href="/essentials/code"
-  >
-    Add sample code to demonstrate how to use your product.
-  </Card>
-  <Card
-    title="Images"
-    icon="image"
-    href="/essentials/images"
-  >
-    Display images and other media.
-  </Card>
-  <Card
-    title="Reusable snippets"
-    icon="recycle"
-    href="/essentials/reusable-snippets"
-  >
-    Write once and reuse across your docs.
-  </Card>
-</Columns>
+### Real-Time Synchronization
+- **Sub-5µs latency** between MCU pixel output starts
+- **Frame-locked rendering** with acknowledgment protocol
+- **80 MHz ParlIO** high-speed inter-MCU communication
 
-## Need inspiration?
+### Dual Network Interfaces
+- **Wi-Fi Control**: Full WLED web interface, REST API, and UDP sync
+- **BLE Control**: Low-power mobile control for basic operations
+- **Seamless Handoff**: Configurations synchronized between interfaces
 
-<Card
-  title="See complete examples"
-  icon="stars"
-  href="https://mintlify.com/customers"
->
-  Browse our showcase of exceptional documentation sites.
-</Card>
+### Arduino Component Integration
+Built on proven Arduino ecosystem components:
+- **WLED Effects Engine**: Industry-standard lighting effects library
+- **AsyncTCP & ESPAsyncWebServer**: Non-blocking network stack
+- **Custom AT Command Framework**: Efficient inter-MCU communication
+- **NimBLE Stack**: Lightweight Bluetooth implementation
+
+## Communication Architecture
+
+The system uses three primary communication channels:
+1. **80 MHz ParlIO**: High-speed pixel data streaming
+2. **5Mbauds UART**: AT command protocol and firmware updates
+3. **Wi-Fi/BLE**: User control interfaces
+
+## Getting Started
+
+Explore the documentation sections for detailed implementation guides, hardware setup, and development workflows for both MCU platforms.
