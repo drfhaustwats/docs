@@ -3,9 +3,9 @@
   "theme": "mint",
   "name": "Watts v3 controler",
   "colors": {
-    "primary": "#16A34A",
-    "light": "#07C983",
-    "dark": "#15803D"
+    "primary": "#0F172A",
+    "light": "#334155",
+    "dark": "#020617"
   },
   "favicon": "/favicon.svg",
   "navigation": {
