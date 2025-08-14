@@ -1,0 +1,336 @@
+---
+title: "Arduino as Component Setup"
+description: "Complete guide to creating ESP-IDF projects with Arduino as a Component integration"
+---
+
+# Arduino as Component Setup
+
+This chapter details the complete workflow for creating ESP-IDF projects that integrate Arduino libraries and components, using the Arduino-as-Component (AaC) framework.
+
+## Overview
+
+Arduino as Component allows you to:
+- Use Arduino libraries within ESP-IDF projects
+- Access both Arduino and ESP-IDF APIs simultaneously  
+- Leverage the ESP-IDF build system and advanced features
+- Maintain compatibility with existing Arduino ecosystem components
+
+## Project Setup Workflow
+
+### Step 1: Create New Project from Template
+
+Start with the Arduino as Component project template:
+
+```bash
+# Using ESP-IDF project templates
+idf.py create-project-from-example "espressif/arduino-esp32:Arduino_as_ESP-IDF_component/Arduino_as_ESP-IDF_component" my_project
+
+# Or clone from GitHub
+git clone https://github.com/espressif/arduino-esp32.git
+cp -r arduino-esp32/examples/Arduino_as_ESP-IDF_component my_project
+cd my_project
+```
+
+### Step 2: Create Components Directory
+
+Create a dedicated folder for all Arduino and custom components:
+
+```bash
+mkdir components
+cd components
+```
+
+### Step 3: Add Arduino Core Component
+
+Clone the Arduino ESP32 core into your components directory:
+
+```bash
+# Clone the specific Arduino core version you need
+git clone -b 3.0.0 https://github.com/espressif/arduino-esp32.git arduino
+```
+
+The Arduino core already includes its own `CMakeLists.txt`, so no additional configuration is needed for this component.
+
+## Component Integration
+
+### Main CMakeLists.txt Configuration  
+
+Navigate to your project's `main/` folder and edit the `CMakeLists.txt` file to include all required components:
+
+```cmake
+idf_component_register(
+    SRCS "main.cpp"
+    INCLUDE_DIRS ""
+    REQUIRES arduino log
+    PRIV_REQUIRES arduino ESPAsyncWebServer AsyncTCP athost async-mqtt-client WLEDNetwork toki timezone time jsonW e131 NeoPixelBus FastLED wled esp_driver_bitscrambler
+)
+```
+
+### Component Dependencies Explained
+
+| Component | Purpose | Type |
+|-----------|---------|------|
+| `arduino` | Arduino core framework | Public requirement |
+| `log` | ESP-IDF logging | Public requirement |
+| `ESPAsyncWebServer` | Non-blocking web server | Private requirement |
+| `AsyncTCP` | Asynchronous TCP library | Private requirement |
+| `athost` | Custom AT command host | Private requirement |
+| `wled` | LED effects engine | Private requirement |
+| `FastLED` | High-performance LED library | Private requirement |
+
+## Adding Custom Components
+
+### For Libraries with Existing CMakeLists.txt
+
+If a library already has ESP-IDF compatibility (contains `CMakeLists.txt`):
+
+1. Clone or copy the library to `components/library_name/`
+2. Add the component name to your main `CMakeLists.txt` 
+3. No additional configuration needed
+
+Example:
+```bash
+cd components
+git clone https://github.com/me-no-dev/ESPAsyncWebServer.git ESPAsyncWebServer
+```
+
+### For Libraries Without CMakeLists.txt
+
+For Arduino libraries that need ESP-IDF integration, create a `CMakeLists.txt` file:
+
+#### Basic Component Template
+
+```cmake
+file(GLOB_RECURSE COMPONENT_SRCS "src/*.cpp")
+
+idf_component_register(
+    SRCS ${COMPONENT_SRCS}
+    INCLUDE_DIRS "src"
+    REQUIRES arduino
+)
+```
+
+#### Advanced Component Template
+
+For more complex components with multiple dependencies:
+
+```cmake
+file(GLOB_RECURSE ATHOST_SRCS 
+    "src/*.cpp"
+    "src/*.c"
+)
+
+idf_component_register(
+    SRCS ${ATHOST_SRCS}
+    INCLUDE_DIRS "src" "include"
+    REQUIRES arduino log esp_driver_uart
+    PRIV_REQUIRES nvs_flash
+)
+
+# Add compile definitions if needed
+target_compile_definitions(${COMPONENT_LIB} PRIVATE
+    ARDUINO_VARIANT_ESP32C5
+    CONFIG_ATHOST_ENABLE=1
+)
+```
+
+## Real-World Component Examples
+
+### ATHost Component (Custom AT Command Handler)
+
+```cmake
+# components/athost/CMakeLists.txt
+file(GLOB_RECURSE ATHOST_SRCS 
+    "src/*.cpp"
+    "src/*.h"
+)
+
+idf_component_register(
+    SRCS ${ATHOST_SRCS}
+    INCLUDE_DIRS "src"
+    REQUIRES arduino esp_driver_uart log
+    PRIV_REQUIRES nvs_flash
+)
+```
+
+### WLED Component (LED Effects Engine)
+
+```cmake
+# components/wled/CMakeLists.txt  
+file(GLOB_RECURSE WLED_SRCS 
+    "*.cpp"
+    "font/*.h"
+)
+
+# Exclude problematic files
+list(FILTER WLED_SRCS EXCLUDE REGEX ".*wled00\.ino$")
+
+idf_component_register(
+    SRCS ${WLED_SRCS}
+    INCLUDE_DIRS "." "font"
+    REQUIRES arduino AsyncTCP ESPAsyncWebServer FastLED NeoPixelBus
+    PRIV_REQUIRES nvs_flash esp_driver_rmt esp_driver_spi
+)
+
+target_compile_definitions(${COMPONENT_LIB} PRIVATE
+    WLED_ENABLE_ADALIGHT=1
+    WLED_ENABLE_MQTT=1
+    WLED_MAX_PIXELS=1000
+)
+```
+
+### Network Component (Async Networking)
+
+```cmake
+# components/WLEDNetwork/CMakeLists.txt
+idf_component_register(
+    SRCS ""
+    INCLUDE_DIRS ""
+    REQUIRES ESPAsyncWebServer AsyncTCP esp_wifi
+)
+```
+
+## Directory Structure
+
+Your final project structure should look like this:
+
+```
+my_project/
+├── main/
+│   ├── CMakeLists.txt          # Main component registration
+│   ├── main.cpp                # Arduino setup() and loop()  
+│   └── idf_component.yml       # Component dependencies
+├── components/
+│   ├── arduino/                # Arduino ESP32 core
+│   ├── ESPAsyncWebServer/      # Web server library
+│   ├── AsyncTCP/               # TCP library
+│   ├── athost/                 # Custom AT host component
+│   │   ├── src/
+│   │   │   ├── ATHost.cpp
+│   │   │   └── ATHost.h
+│   │   └── CMakeLists.txt      # Custom component config
+│   ├── wled/                   # WLED effects engine
+│   │   ├── FX.cpp
+│   │   ├── wled.cpp
+│   │   └── CMakeLists.txt
+│   └── FastLED/                # LED library
+├── CMakeLists.txt              # Project root config
+├── sdkconfig.defaults          # ESP-IDF configuration
+└── partitions.csv              # Partition table
+```
+
+## Build Process
+
+### Configure the Project
+
+```bash
+# Set target chip
+idf.py set-target esp32c5
+
+# Configure project (opens menuconfig)  
+idf.py menuconfig
+```
+
+### Key Configuration Options
+
+In `menuconfig`, ensure these settings:
+
+- **Component Config → Arduino Configuration**
+  - Enable "Arduino as ESP-IDF component"
+  - Set appropriate core debug level
+  - Configure loop task settings
+
+- **Component Config → Driver Configurations**
+  - Enable required peripheral drivers (RMT, SPI, UART, etc.)
+
+### Build and Flash
+
+```bash
+# Clean build
+idf.py clean
+
+# Build project
+idf.py build
+
+# Flash to device
+idf.py flash monitor
+```
+
+## Common CMakeLists.txt Patterns
+
+### Multi-Source Component
+
+```cmake
+file(GLOB_RECURSE SRCS 
+    "src/*.cpp"
+    "src/*.c"
+    "lib/*.cpp"
+)
+
+idf_component_register(
+    SRCS ${SRCS}
+    INCLUDE_DIRS "src" "lib" "include"
+    REQUIRES arduino log
+)
+```
+
+### Header-Only Library
+
+```cmake
+idf_component_register(
+    SRCS ""
+    INCLUDE_DIRS "src"
+    REQUIRES arduino
+)
+```
+
+### Component with External Dependencies
+
+```cmake
+idf_component_register(
+    SRCS "src/component.cpp"
+    INCLUDE_DIRS "src"
+    REQUIRES arduino esp_driver_spi
+    PRIV_REQUIRES mbedtls nvs_flash
+)
+
+# Add external library
+target_link_libraries(${COMPONENT_LIB} PRIVATE external_lib)
+```
+
+## Troubleshooting
+
+### Common Build Issues
+
+**Missing Arduino.h:**
+```
+fatal error: Arduino.h: No such file or directory
+```
+- Ensure `arduino` is in your `REQUIRES` list
+- Verify Arduino core is properly cloned in `components/arduino/`
+
+**Component Not Found:**
+```
+CMake Error: Cannot find component 'component_name'
+```
+- Check component name spelling in `CMakeLists.txt`
+- Verify component directory exists in `components/`
+- Ensure component has its own `CMakeLists.txt`
+
+**Circular Dependencies:**
+```
+CMake Error: Circular dependency between components
+```
+- Move shared dependencies to `PRIV_REQUIRES`
+- Restructure component hierarchy
+- Use interface libraries for shared headers
+
+### Best Practices
+
+1. **Version Control**: Pin Arduino core and library versions using git tags
+2. **Dependencies**: Use `REQUIRES` for public APIs, `PRIV_REQUIRES` for internal dependencies  
+3. **File Organization**: Keep source files in `src/`, headers in `include/`
+4. **Build Optimization**: Use `GLOB_RECURSE` judiciously to avoid unnecessary rebuilds
+5. **Configuration**: Use `target_compile_definitions()` for component-specific defines
+
+This Arduino as Component setup provides a robust foundation for complex ESP-IDF projects while maintaining compatibility with the extensive Arduino ecosystem.
