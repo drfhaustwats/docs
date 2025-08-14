@@ -1,42 +1,72 @@
 ---
-title: "C/C++ Firmware Project Documentation"
-description: "Comprehensive documentation for a dual-MCU firmware project with Arduino component integration capabilities"
+title: "Watts v2 controller"
+description: "Dual-MCU ESP32 outdoor lighting system with synchronized LED control across Wi-Fi and BLE interfaces"
 ---
 
-# C/C++ Firmware Project
+# Dual-MCU ESP32 Outdoor Lighting System
 
-This documentation covers a comprehensive C/C++ firmware project designed to support two different microcontroller units (MCUs) with seamless Arduino component integration capabilities.
+This documentation covers the Watts v2 controller firmware architecture, designed as a high-performance dual-MCU outdoor lighting system with synchronized LED control and robust communication protocols.
 
-## Project Overview
+## System Architecture Overview
 
-Our firmware project provides a robust foundation for embedded development across multiple MCU platforms:
+The Watts v2 controller implements a sophisticated dual-MCU topology that separates concerns while maintaining tight synchronization:
 
-- **ESP32-H2 AT Firmware**: Advanced Bluetooth Low Energy (BLE) and LED control system with custom AT command support
-- **ESP32-C5 WLED Firmware**: Full-featured LED lighting control system with web interface, effects engine, and extensive peripheral support
+```
++-------------------------------------------------------------+
+|                      ESP32-C5 (Main)                        |
+|  • WLED Effects Engine (Arduino component)                  |
+|  • Wi-Fi 2.4 / 5 GHz STA/AP                                 |
+|  • ParlIO TX 1-bit @ 40 MHz + VALID pin → pixel stream      |
+|  • RMT-TX Channel 0,1 → Local LED Strips                    |
+|  • AT-Host task over UART0                                  |
++-----------------------▲-------------------------------------+
+                        | 40 MHz ParlIO (DATA / CLK / VALID)
+                        | Frame-select header + Ch-2/3 pixels
++-----------------------▼-------------------------------------+
+|                      ESP32-H2 (Secondary)                   |
+|  • AT-Firmware Core (NimBLE + Parser)                       |
+|  • BLE 5.2 Peripheral                                       |
+|  • ParlIO/SPI-Slave DMA RX                                  |
+|  • RMT-TX Channel 2,3 → Remote LED Strips                   |
++-------------------------------------------------------------+
+```
 
-## Architecture
+## MCU Role Separation
 
-The project is structured to maximize code reuse while maintaining platform-specific optimizations:
-
-### Dual MCU Support
-- **ESP32-H2**: Optimized for BLE applications, AT command processing, and efficient LED control
-- **ESP32-C5**: Feature-rich platform supporting web servers, advanced LED effects, and multiple communication protocols
-
-### Arduino Component Integration
-Our firmware seamlessly integrates Arduino ecosystem components, providing:
-- **FastLED**: High-performance LED library support
-- **AsyncTCP & ESPAsyncWebServer**: Non-blocking network communication
-- **NeoPixelBus**: Advanced pixel control capabilities
-- **Custom Components**: Specialized modules for AT command handling, settings management, and LED effects
+| Responsibility | ESP32-C5 (Main) | ESP32-H2 (Secondary) |
+|---|---|---|
+| **LED Channels** | Ch-0, Ch-1 (RMT-TX) | Ch-2, Ch-3 (RMT-TX) |
+| **Effects Engine** | WLED renders full RGB frame | Mirrors pixel data |
+| **Pixel Transport** | ParlIO TX, 40 MHz + VALID | ParlIO/SPI-Slave DMA RX |
+| **Network Stack** | Wi-Fi 2.4/5 GHz, mDNS, HTTP(S) OTA | BLE (GAP + GATT) |
+| **AT Protocol Role** | Master / Host | Slave / Device |
 
 ## Key Features
 
-- **Unified Component Architecture**: Shared libraries and utilities across both MCU platforms
-- **Modular Design**: Easy integration of new Arduino libraries and custom components
-- **Advanced LED Control**: Support for multiple LED protocols and complex lighting effects
-- **Network Capabilities**: Web interfaces, MQTT, E1.31, and custom protocols
-- **Extensible Framework**: Simple addition of new features and hardware support
+### Real-Time Synchronization
+- **Sub-5µs latency** between MCU pixel output starts
+- **Frame-locked rendering** with acknowledgment protocol
+- **40 MHz ParlIO** high-speed inter-MCU communication
+
+### Dual Network Interfaces
+- **Wi-Fi Control**: Full WLED web interface, REST API, and UDP sync
+- **BLE Control**: Low-power mobile control for basic operations
+- **Seamless Handoff**: Configurations synchronized between interfaces
+
+### Arduino Component Integration
+Built on proven Arduino ecosystem components:
+- **WLED Effects Engine**: Industry-standard lighting effects library
+- **AsyncTCP & ESPAsyncWebServer**: Non-blocking network stack
+- **Custom AT Command Framework**: Efficient inter-MCU communication
+- **NimBLE Stack**: Lightweight Bluetooth implementation
+
+## Communication Architecture
+
+The system uses three primary communication channels:
+1. **40 MHz ParlIO**: High-speed pixel data streaming
+2. **921.6k UART**: AT command protocol and firmware updates
+3. **Wi-Fi/BLE**: User control interfaces
 
 ## Getting Started
 
-Navigate through the documentation sections to explore platform-specific implementations, shared components, and integration guides for your specific use case.
+Explore the documentation sections for detailed implementation guides, hardware setup, and development workflows for both MCU platforms.
