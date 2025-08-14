@@ -1,0 +1,172 @@
+---
+title: "Hardware & Pinouts"
+description: "ESP32-C5 and ESP32-H2 hardware specifications, GPIO assignments, and inter-MCU connections"
+---
+
+# Hardware Architecture & Pinouts
+
+This section details the hardware specifications, GPIO pin assignments, and physical connections for both microcontrollers in the Watts v3 dual-MCU lighting system.
+
+## ESP32-C5 Main Controller
+
+### Overview & Specifications
+The ESP32-C5 serves as the primary controller, handling Wi-Fi connectivity, WLED effects processing, and coordination of the entire lighting system.
+
+**Key Capabilities:**
+- **CPU**: RISC-V dual-core, up to 240 MHz
+- **Wi-Fi**: 2.4/5 GHz 802.11ax (Wi-Fi 6)
+- **Memory**: 4MB Flash, 512KB SRAM
+- **Peripherals**: RMT (40 MHz), ParlIO, UART, SPI, I2C, ADC
+- **Role**: WLED effects engine, Wi-Fi interface, AT command master
+
+### ESP32-C5 GPIO Pin Assignments
+
+#### Inter-MCU Communication (ParlIO)
+| GPIO | Function | Description |
+|------|----------|-------------|
+| 10 | ParlIO Clock Output | 80 MHz clock signal to H2 |
+| 25 | ParlIO Valid Signal | Frame synchronization to H2 |
+| 26 | ParlIO Data | Pixel data transmission to H2 (WLED 3rd LED output) |
+
+#### UART Communication (AT Host)
+| GPIO | Function | Description |
+|------|----------|-------------|
+| 1 | UART RX | Receives AT responses from H2 |
+| 6 | UART TX | Sends AT commands to H2 |
+| 7 | UART RTS | Hardware flow control output |
+| 8 | UART CTS | Hardware flow control input |
+
+#### System & Debug
+| GPIO | Function | Description |
+|------|----------|-------------|
+| 27 | RGB LED | Built-in status indicator |
+| 11 | Debug UART TX | Serial console output |
+| 12 | Debug UART RX | Serial console input |
+
+#### Expandable I/O
+| GPIO | Function | Description |
+|------|----------|-------------|
+| 0-1 | I2C (SDA/SCL) | Sensor/display interface |
+| 6,8,9,10 | SPI | External device interface |
+| 1-6 | ADC (A0-A5) | Analog input channels |
+| 2-3 | LP I2C | Low-power device interface |
+| 4-5 | LP UART | Low-power serial interface |
+
+---
+
+## ESP32-H2 Secondary Controller
+
+### Overview & Specifications
+The ESP32-H2 functions as a dedicated LED processor and BLE interface, handling remote LED channels and low-power connectivity.
+
+**Key Capabilities:**
+- **CPU**: RISC-V single-core, up to 96 MHz
+- **BLE**: Bluetooth 5.2, Mesh, Thread, Zigbee ready
+- **Memory**: 4MB Flash, 320KB SRAM
+- **Peripherals**: RMT (32 MHz), SPI Slave, UART
+- **Role**: BLE interface, remote LED control, AT command slave
+
+### ESP32-H2 GPIO Pin Assignments
+
+#### Inter-MCU Communication (UART)
+| GPIO | Function | Description |
+|------|----------|-------------|
+| 2 | UART TX | Sends AT responses to C5 |
+| 3 | UART RX | Receives AT commands from C5 |
+| 4 | UART RTS | Hardware flow control output |
+| 5 | UART CTS | Hardware flow control input |
+
+**UART Specifications:**
+- **Baud Rate**: 5 Mbaud (5,000,000 bps)
+- **Flow Control**: Hardware CTS/RTS enabled
+- **Port**: UART_NUM_1
+
+#### Data Reception (SPI Slave Mode)
+| GPIO | Function | Description |
+|------|----------|-------------|
+| 10 | SPI Clock Input | 80 MHz clock from C5 |
+| 11 | SPI MOSI | Pixel data from C5 |
+| 25 | SPI Chip Select | Frame sync from C5 |
+
+#### LED Output (RMT Channels)
+| GPIO | Function | Description |
+|------|----------|-------------|
+| 27 | RMT Channel 2 | LED Strip Output Ch-2 |
+| 26 | RMT Channel 3 | LED Strip Output Ch-3 |
+
+**RMT Configuration:**
+- **Resolution**: 32 MHz for precise WS2812 timing
+- **Channels**: 2 and 3 (remote LED strips)
+
+---
+
+## Inter-MCU Physical Connections
+
+### Primary Communication Bus
+The two MCUs are connected via high-speed parallel interface and UART:
+
+```
+ESP32-C5 (Master)           ESP32-H2 (Slave)
+─────────────────           ─────────────────
+GPIO 10 (ParlIO CLK)  ────► GPIO 10 (SPI SCLK)
+GPIO 26 (ParlIO DATA) ────► GPIO 11 (SPI MOSI)
+GPIO 25 (ParlIO VALID)────► GPIO 25 (SPI CS)
+
+GPIO 6  (UART TX)     ────► GPIO 3  (UART RX)
+GPIO 1  (UART RX)     ◄──── GPIO 2  (UART TX)
+GPIO 7  (UART RTS)    ────► GPIO 5  (UART CTS)
+GPIO 8  (UART CTS)    ◄──── GPIO 4  (UART RTS)
+
+GND                   ────── GND
+3.3V                  ────── 3.3V
+```
+
+### Communication Specifications
+
+#### High-Speed Pixel Data
+- **Protocol**: ParlIO (C5) → SPI Slave (H2)
+- **Clock Rate**: 80 MHz
+- **Data Width**: 1-bit serial
+- **Frame Size**: Up to 8,008 bytes
+- **Synchronization**: VALID pin for frame boundaries
+
+#### Control & Status
+- **Protocol**: UART with AT commands
+- **Baud Rate**: 5 Mbaud
+- **Flow Control**: Hardware CTS/RTS
+- **Direction**: Bidirectional
+- **Use Cases**: Configuration sync, firmware updates, status reporting
+
+### Power & Grounding
+Both MCUs operate at **3.3V logic levels**. Ensure:
+- Common ground connection
+- Stable 3.3V power supply for both units
+- Proper decoupling capacitors near each MCU
+- Signal integrity for high-speed (20 MHz) connections
+
+---
+
+## Configuration Notes
+
+### Pin Conflict Resolution
+- **GPIO 25 on C5**: Hardcoded as ParlIO VALID signal; assigned to WLED Channel 4 as placeholder (not used for LED output)
+- **GPIO 26 on C5**: Configured as 3rd LED output in WLED, used for ParlIO data transmission
+- **GPIO 10-11 on H2**: SPI input pins, no conflicts with RMT output channels
+
+### Configurable Options
+All pin assignments can be modified via:
+- **C5**: `#define` macros in header files
+- **H2**: `uart_set_pin()` and peripheral configuration
+- **LED Pins**: RMT channel assignment via configuration
+
+### Signal Quality Requirements
+- **Rise/Fall Times**: < 5ns for 80 MHz operation
+- **Cable Length**: Keep inter-MCU connections under 5cm
+- **EMI Shielding**: Consider shielded cables for production units
+- **Ground Plane**: PCB should have continuous ground plane
+
+### WLED Integration Notes
+- **GPIO 26 Configuration**: Set as 3rd LED output in WLED hardware configuration
+- **GPIO 25 Usage**: Assigned to WLED Channel 4 as placeholder (WLED requires a pin assignment but this pin is not used for LED output)
+- **ParlIO Override**: GPIO 25 is hardcoded in ParlIO implementation as VALID signal, regardless of WLED Channel 4 initialization
+- **Pin Manager**: WLED pin manager automatically configures ParlIO data pin (GPIO 26) based on 3rd LED output selection

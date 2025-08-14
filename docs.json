@@ -17,6 +17,7 @@
             "group": "Getting started",
             "pages": [
               "introduction",
+              "hardware",
               "quickstart",
               "development"
             ]
