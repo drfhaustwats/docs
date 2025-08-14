@@ -1,0 +1,42 @@
+---
+title: "C/C++ Firmware Project Documentation"
+description: "Comprehensive documentation for a dual-MCU firmware project with Arduino component integration capabilities"
+---
+
+# C/C++ Firmware Project
+
+This documentation covers a comprehensive C/C++ firmware project designed to support two different microcontroller units (MCUs) with seamless Arduino component integration capabilities.
+
+## Project Overview
+
+Our firmware project provides a robust foundation for embedded development across multiple MCU platforms:
+
+- **ESP32-H2 AT Firmware**: Advanced Bluetooth Low Energy (BLE) and LED control system with custom AT command support
+- **ESP32-C5 WLED Firmware**: Full-featured LED lighting control system with web interface, effects engine, and extensive peripheral support
+
+## Architecture
+
+The project is structured to maximize code reuse while maintaining platform-specific optimizations:
+
+### Dual MCU Support
+- **ESP32-H2**: Optimized for BLE applications, AT command processing, and efficient LED control
+- **ESP32-C5**: Feature-rich platform supporting web servers, advanced LED effects, and multiple communication protocols
+
+### Arduino Component Integration
+Our firmware seamlessly integrates Arduino ecosystem components, providing:
+- **FastLED**: High-performance LED library support
+- **AsyncTCP & ESPAsyncWebServer**: Non-blocking network communication
+- **NeoPixelBus**: Advanced pixel control capabilities
+- **Custom Components**: Specialized modules for AT command handling, settings management, and LED effects
+
+## Key Features
+
+- **Unified Component Architecture**: Shared libraries and utilities across both MCU platforms
+- **Modular Design**: Easy integration of new Arduino libraries and custom components
+- **Advanced LED Control**: Support for multiple LED protocols and complex lighting effects
+- **Network Capabilities**: Web interfaces, MQTT, E1.31, and custom protocols
+- **Extensible Framework**: Simple addition of new features and hardware support
+
+## Getting Started
+
+Navigate through the documentation sections to explore platform-specific implementations, shared components, and integration guides for your specific use case.
