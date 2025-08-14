@@ -44,42 +44,49 @@ Asynchronous notifications from slave to master:
 ### LED Frame Synchronization
 The most critical protocol operation coordinates LED frame rendering across both MCUs:
 
-```mermaid
-sequenceDiagram
-    participant C5 as ESP32-C5 (Master)
-    participant H2 as ESP32-H2 (Slave)
-    
-    C5->>H2: AT+LED_PREP=500,300
-    H2->>C5: OK
-    Note over H2: SPI slave ready to receive
-    
-    C5->>H2: [80MHz ParlIO stream]
-    Note over H2: Frame data via SPI
-    
-    H2->>C5: +LED_DONE:123
-    Note over C5,H2: Frame 123 complete
+```
+ESP32-C5 (Master)           ESP32-H2 (Slave)
+        |                           |
+        |  AT+LED_PREP=500,300      |
+        |-------------------------->|
+        |                           | (SPI slave ready)
+        |         OK                |
+        |<--------------------------|
+        |                           |
+        | [80MHz ParlIO stream]     |
+        |=========================> | (Frame data via SPI)
+        |                           |
+        |      +LED_DONE:123        |
+        |<--------------------------|
+        |                           |
+     (Frame 123 complete on both MCUs)
 ```
 
 ### BLE Configuration Flow
 BLE setup and management through AT commands:
 
-```mermaid
-sequenceDiagram
-    participant C5 as ESP32-C5 (Master)
-    participant H2 as ESP32-H2 (Slave)
-    
-    C5->>H2: AT+BLEINIT=2
-    H2->>C5: OK
-    
-    C5->>H2: AT+BLENAME="Watts-Controller"
-    H2->>C5: OK
-    
-    C5->>H2: AT+BLEADVSTART
-    H2->>C5: OK
-    Note over H2: BLE advertising active
-    
-    H2->>C5: +BLEGATTSRECV:48656C6C6F
-    Note over C5: Process BLE data
+```
+ESP32-C5 (Master)           ESP32-H2 (Slave)
+        |                           |
+        |    AT+BLEINIT=2           |
+        |-------------------------->|
+        |         OK                |
+        |<--------------------------|
+        |                           |
+        | AT+BLENAME="Watts-Ctrl"   |
+        |-------------------------->|
+        |         OK                |
+        |<--------------------------|
+        |                           |
+        |   AT+BLEADVSTART          |
+        |-------------------------->|
+        |         OK                | (BLE advertising active)
+        |<--------------------------|
+        |                           |
+        | +BLEGATTSRECV:48656C6C6F  |
+        |<--------------------------| (BLE data from client)
+        |                           |
+     (Process BLE data for lighting control)
 ```
 
 ## Command Categories
