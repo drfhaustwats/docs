@@ -1,0 +1,200 @@
+---
+title: "LED Control Commands"
+description: "AT commands for LED frame coordination and control"
+---
+
+# LED Control AT Commands
+
+LED control commands manage the high-speed coordination of LED frame data between the ESP32-C5 and ESP32-H2 MCUs.
+
+## AT+LED_PREP
+
+Prepares the ESP32-H2 to receive LED frame data via SPI slave interface.
+
+<ParamField query="ch2_pixels" type="integer" required>
+  Number of pixels for LED channel 2 (0-1000)
+</ParamField>
+
+<ParamField query="ch3_pixels" type="integer" required>
+  Number of pixels for LED channel 3 (0-1000)
+</ParamField>
+
+### Request
+```
+AT+LED_PREP=<ch2_pixels>,<ch3_pixels>
+```
+
+### Response
+```
+OK      # H2 ready to receive frame data
+ERROR   # Failed to prepare (invalid params or busy)
+```
+
+### Example
+```bash
+AT+LED_PREP=500,300
+OK
+
+# ESP32-H2 now ready to receive frame data for:
+# - Channel 2: 500 pixels  
+# - Channel 3: 300 pixels
+```
+
+### Implementation Details
+- **Timeout**: 100ms (time-critical operation)
+- **SPI Setup**: Configures SPI slave DMA for frame reception
+- **Frame Format**: Expects 8-byte header + pixel data
+- **Maximum Frame**: 8,008 bytes (1000 pixels × 4 bytes × 2 channels + header)
+
+### Error Conditions
+- Invalid pixel counts (negative or > 1000)
+- SPI slave already busy with previous frame
+- Insufficient memory for frame buffer allocation
+
+---
+
+## AT+LED_STATS
+
+Returns LED controller statistics and current state.
+
+### Request
+```
+AT+LED_STATS
+```
+
+### Response
+```
++LED_STATS:SPI,<state>,<frames_ok>,<frames_error>,<crc_errors>
+```
+
+<ResponseField name="state" type="string">
+  Current LED controller state: IDLE, PREP, RECEIVING, PROCESSING
+</ResponseField>
+
+<ResponseField name="frames_ok" type="integer">
+  Total successfully processed frames since boot
+</ResponseField>
+
+<ResponseField name="frames_error" type="integer">
+  Total frames that failed processing
+</ResponseField>
+
+<ResponseField name="crc_errors" type="integer">
+  Total frames with CRC checksum errors
+</ResponseField>
+
+### Example
+```bash
+AT+LED_STATS
++LED_STATS:SPI,IDLE,1247,3,0
+OK
+
+# Status: IDLE state, 1247 good frames, 3 errors, 0 CRC failures
+```
+
+### State Descriptions
+
+| State | Description |
+|-------|-------------|
+| `IDLE` | Not processing, ready for new frame |
+| `PREP` | Prepared and waiting for frame data |
+| `RECEIVING` | Currently receiving frame via SPI |
+| `PROCESSING` | Processing frame data to RMT channels |
+
+---
+
+## AT+LED_RESET
+
+Resets the LED controller to idle state, clearing any ongoing operations.
+
+### Request
+```
+AT+LED_RESET
+```
+
+### Response
+```
+OK      # LED controller reset successfully
+ERROR   # Reset failed (should not occur)
+```
+
+### Example
+```bash
+AT+LED_RESET
+OK
+
+# LED controller now in IDLE state
+# Any ongoing frame operations cancelled
+```
+
+### Use Cases
+- Recovery from frame timeout or error conditions
+- Clearing stuck SPI operations
+- System initialization/cleanup
+- Emergency stop of LED operations
+
+### Implementation Details
+- **Effect**: Stops SPI slave, clears frame buffers, resets RMT channels
+- **Timing**: Immediate operation, no frame synchronization required
+- **Safety**: Safe to call at any time, even during frame processing
+
+---
+
+## Unsolicited Result Codes (URCs)
+
+### +LED_DONE
+
+Sent automatically when the ESP32-H2 completes processing a LED frame.
+
+```
++LED_DONE:<frame_id>
+```
+
+<ResponseField name="frame_id" type="integer">
+  Frame sequence number for synchronization with ESP32-C5
+</ResponseField>
+
+#### Example
+```bash
+# After AT+LED_PREP and successful frame transmission:
++LED_DONE:123
+
+# Frame 123 has been processed and output to RMT channels 2&3
+```
+
+#### Timing
+- **Latency**: <5µs from SPI reception complete to RMT output start
+- **Synchronization**: Enables frame-locked rendering across both MCUs
+- **Reliability**: Only sent after successful CRC verification and RMT setup
+
+---
+
+## Integration with NeoPixelBus
+
+The LED commands integrate automatically with the NeoPixelBus framework on ESP32-C5:
+
+```cpp
+// NeoEsp32ParlC5SharedManager.h integration
+void IRAM_ATTR prepareLedFrame(uint16_t ch2_pixels, uint16_t ch3_pixels) {
+    char cmd[64];
+    snprintf(cmd, sizeof(cmd), "AT+LED_PREP=%d,%d", ch2_pixels, ch3_pixels);
+    
+    if (!ATHost_sendATWaitOK(cmd, 100)) {
+        // Handle preparation failure
+        return;
+    }
+    
+    // Begin ParlIO transmission to H2
+    startParlIOTransmission();
+}
+```
+
+### Automatic Frame Coordination
+
+1. **WLED Render**: Calculates full 4-channel frame
+2. **AT+LED_PREP**: Notifies H2 of channels 2&3 pixel counts
+3. **ParlIO Stream**: 80MHz data transmission to H2 SPI slave
+4. **+LED_DONE**: H2 confirms frame processing complete
+5. **Next Frame**: Process repeats for next frame
+
+This coordination ensures perfect synchronization between local (C5) and remote (H2) LED outputs.

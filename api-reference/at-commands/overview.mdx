@@ -1,0 +1,122 @@
+---
+title: "AT Commands Overview"
+description: "Complete reference for all AT commands in the dual-MCU lighting system"
+---
+
+# AT Commands API Reference
+
+This section provides detailed documentation for all AT commands used in the Watts v3 dual-MCU lighting system. Commands are organized by functional category.
+
+## Command Categories
+
+### Configuration Commands
+System initialization and setup commands:
+- [AT+BLEINIT](/api-reference/at-commands/ble#at-bleinit) - Initialize BLE stack
+- [AT+BLENAME](/api-reference/at-commands/ble#at-blename) - Set BLE device name
+- [AT+RST](/api-reference/at-commands/system#at-rst) - System restart
+
+### LED Control Commands
+High-speed LED coordination between MCUs:
+- [AT+LED_PREP](/api-reference/at-commands/led#at-led-prep) - Prepare LED frame reception
+- [AT+LED_STATS](/api-reference/at-commands/led#at-led-stats) - Get LED controller statistics
+- [AT+LED_RESET](/api-reference/at-commands/led#at-led-reset) - Reset LED controller
+
+### BLE Management Commands
+Bluetooth Low Energy operations:
+- [AT+BLEADVSTART](/api-reference/at-commands/ble#at-bleadvstart) - Start BLE advertising
+- [AT+BLEADVSTOP](/api-reference/at-commands/ble#at-bleadvstop) - Stop BLE advertising
+- [AT+BLESVC](/api-reference/at-commands/ble#at-blesvc) - List BLE services
+- [AT+BLECHAR](/api-reference/at-commands/ble#at-blechar) - List characteristics
+- [AT+BLEREAD](/api-reference/at-commands/ble#at-bleread) - Read characteristic value
+- [AT+BLEWRITE](/api-reference/at-commands/ble#at-blewrite) - Write characteristic value
+
+### Firmware Management
+System maintenance and updates:
+- [AT+OTAUPDATE](/api-reference/at-commands/ota#at-otaupdate) - Firmware update over UART
+
+## Command Format
+
+All AT commands follow the standard format:
+```
+AT+COMMAND[=param1[,param2[,...]]]
+```
+
+### Response Types
+
+| Response | Description |
+|----------|-------------|
+| `OK` | Command executed successfully |
+| `ERROR` | Command failed |
+| `+DATA:value` | Command returned data |
+
+### Unsolicited Result Codes (URCs)
+
+URCs are asynchronous messages sent by the ESP32-H2 to notify the ESP32-C5 of events:
+
+| URC | Description |
+|-----|-------------|
+| `+LED_DONE:frame_id` | LED frame processing complete |
+| `+BLEGATTSRECV:hexdata` | BLE data received from client |
+| `+ERROR:code` | Error notification |
+
+## Communication Protocol
+
+- **UART Settings**: 5 Mbaud, 8N1, Hardware flow control
+- **Timeout**: Variable by command type (100ms - 30s)
+- **Direction**: ESP32-C5 (master) → ESP32-H2 (slave)
+- **Framework**: Tiny-CAT AT parser on ESP32-H2
+
+## Quick Reference
+
+### Most Used Commands
+
+```bash
+# Initialize BLE
+AT+BLEINIT=2
+AT+BLENAME="Watts-Controller"
+AT+BLEADVSTART
+
+# LED frame coordination (called automatically by NeoPixelBus)
+AT+LED_PREP=500,300
+
+# System management
+AT+LED_STATS
+AT+RST
+```
+
+### Integration Examples
+
+#### C5 (ATHost) Usage
+```cpp
+#include "ATHost.h"
+
+// Initialize BLE on H2
+ATHost_sendATWaitOK("AT+BLEINIT=2", 5000);
+ATHost_sendATWaitOK("AT+BLENAME=\"Watts-v3\"", 1000);
+
+// Prepare LED frame
+if (ATHost_sendLedPrep(500, 300, 100)) {
+    // H2 ready to receive frame data
+}
+```
+
+#### H2 (Command Handler) Implementation
+```c
+#include "cat.h"
+
+// Command handler function
+at_result_t at_cmd_led_prep_spi(at_cmd_t *cmd, at_calldir_t dir) {
+    if (dir == AT_CMD_DIR_SET) {
+        int ch2_pixels = at_get_i(cmd, 0);
+        int ch3_pixels = at_get_i(cmd, 1);
+        
+        // Prepare SPI slave for frame reception
+        spi_led_prepare(ch2_pixels, ch3_pixels);
+        
+        return AT_RESULT_OK;
+    }
+    return AT_RESULT_ERROR;
+}
+```
+
+This API reference provides comprehensive documentation for all AT commands, enabling developers to understand and extend the dual-MCU communication protocol.

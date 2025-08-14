@@ -1,0 +1,442 @@
+---
+title: "BLE Commands"
+description: "AT commands for Bluetooth Low Energy management and operations"
+---
+
+# BLE AT Commands
+
+BLE commands manage the Bluetooth Low Energy stack on the ESP32-H2, providing wireless control interface for the lighting system.
+
+## AT+BLEINIT
+
+Initializes the BLE stack in server mode.
+
+<ParamField query="mode" type="integer" required>
+  BLE role mode (only mode=2 supported for server)
+</ParamField>
+
+### Request
+```
+AT+BLEINIT=<mode>
+```
+
+### Response
+```
+OK      # BLE stack initialized successfully
+ERROR   # Initialization failed
+```
+
+### Example
+```bash
+AT+BLEINIT=2
+OK
+
+# BLE stack now running in server mode
+```
+
+### Implementation Details
+- **Mode 2**: BLE server/peripheral role only
+- **Stack**: Uses NimBLE for low memory footprint
+- **Services**: Automatically creates default GATT services
+- **State**: Must be called before other BLE operations
+
+---
+
+## AT+BLENAME
+
+Sets the BLE device name for advertising and identification.
+
+<ParamField query="name" type="string" required>
+  Device name (can be quoted, max 31 characters)
+</ParamField>
+
+### Request
+```
+AT+BLENAME=<name>
+AT+BLENAME="<quoted name>"
+```
+
+### Response
+```
+OK      # Name set successfully
+ERROR   # Invalid name or BLE not initialized
+```
+
+### Examples
+```bash
+AT+BLENAME=Watts-Controller
+OK
+
+AT+BLENAME="Watts v3 LED Controller"
+OK
+```
+
+### Implementation Details
+- **Length**: Maximum 31 characters (BLE specification limit)
+- **Encoding**: UTF-8 supported
+- **Advertising**: Name appears in BLE advertisement packets
+- **Requirement**: BLE stack must be initialized first
+
+---
+
+## AT+BLEADVSTART
+
+Starts BLE advertising to make device discoverable.
+
+### Request
+```
+AT+BLEADVSTART
+```
+
+### Response
+```
+OK      # Advertising started successfully
+ERROR   # Failed to start (BLE not initialized or already advertising)
+```
+
+### Example
+```bash
+AT+BLEADVSTART
+OK
+
+# Device now discoverable via BLE scanning
+```
+
+### Advertising Details
+- **Interval**: 100ms (fast advertising for quick discovery)
+- **Duration**: Continuous until stopped
+- **Data**: Includes device name and service UUIDs
+- **Connectable**: Allows client connections
+
+---
+
+## AT+BLEADVSTOP
+
+Stops BLE advertising.
+
+### Request
+```
+AT+BLEADVSTOP
+```
+
+### Response
+```
+OK      # Advertising stopped successfully
+ERROR   # Not currently advertising
+```
+
+### Example
+```bash
+AT+BLEADVSTOP
+OK
+
+# Device no longer discoverable, existing connections maintained
+```
+
+---
+
+## AT+BLESVC
+
+Lists all available BLE services with their UUIDs and names.
+
+### Request
+```
+AT+BLESVC
+```
+
+### Response
+```
++BLESVC:<idx>,0x<uuid>,"<name>"
++BLESVC:<idx>,0x<uuid>,"<name>"
+...
+OK
+```
+
+<ResponseField name="idx" type="integer">
+  Service index for use with other commands
+</ResponseField>
+
+<ResponseField name="uuid" type="string">
+  16-bit or 128-bit service UUID in hex format
+</ResponseField>
+
+<ResponseField name="name" type="string">
+  Human-readable service name
+</ResponseField>
+
+### Example
+```bash
+AT+BLESVC
++BLESVC:0,0x1800,"Generic Access"
++BLESVC:1,0x1801,"Generic Attribute"  
++BLESVC:2,0xFFE0,"LED Control Service"
+OK
+```
+
+---
+
+## AT+BLECHAR
+
+Lists characteristics for a specific service.
+
+<ParamField query="svc_idx" type="integer" required>
+  Service index from AT+BLESVC command
+</ParamField>
+
+### Request
+```
+AT+BLECHAR=<svc_idx>
+```
+
+### Response
+```
++BLECHAR:<svc_idx>,<char_idx>,0x<uuid>,"<name>",<props>
++BLECHAR:<svc_idx>,<char_idx>,0x<uuid>,"<name>",<props>
+...
+OK
+```
+
+<ResponseField name="char_idx" type="integer">
+  Characteristic index within the service
+</ResponseField>
+
+<ResponseField name="uuid" type="string">
+  Characteristic UUID in hex format
+</ResponseField>
+
+<ResponseField name="name" type="string">
+  Characteristic name/description
+</ResponseField>
+
+<ResponseField name="props" type="integer">
+  Property flags (read=1, write=2, notify=4, etc.)
+</ResponseField>
+
+### Example
+```bash
+AT+BLECHAR=2
++BLECHAR:2,0,0xFFE1,"LED State",6
++BLECHAR:2,1,0xFFE2,"Brightness",2
+OK
+
+# Service 2 has 2 characteristics:
+# - LED State (read/write properties)
+# - Brightness (write-only)
+```
+
+---
+
+## AT+BLEREAD
+
+Reads the current value of a characteristic.
+
+<ParamField query="svc_idx" type="integer" required>
+  Service index
+</ParamField>
+
+<ParamField query="char_idx" type="integer" required>
+  Characteristic index within service
+</ParamField>
+
+### Request
+```
+AT+BLEREAD=<svc_idx>,<char_idx>
+```
+
+### Response
+```
++BLEREAD:<svc_idx>,<char_idx>,"<hexdata>"
+OK
+```
+
+<ResponseField name="hexdata" type="string">
+  Characteristic value as hex string
+</ResponseField>
+
+### Example
+```bash
+AT+BLEREAD=2,0
++BLEREAD:2,0,"01"
+OK
+
+# LED State characteristic contains value 0x01 (ON)
+```
+
+---
+
+## AT+BLEWRITE
+
+Writes a value to a characteristic.
+
+<ParamField query="svc_idx" type="integer" required>
+  Service index
+</ParamField>
+
+<ParamField query="char_idx" type="integer" required>
+  Characteristic index within service
+</ParamField>
+
+<ParamField query="hexdata" type="string" required>
+  Data to write as hex string (quoted)
+</ParamField>
+
+### Request
+```
+AT+BLEWRITE=<svc_idx>,<char_idx>,"<hexdata>"
+```
+
+### Response
+```
+OK      # Write successful
+ERROR   # Write failed (invalid params or not writable)
+```
+
+### Example
+```bash
+AT+BLEWRITE=2,0,"01"
+OK
+
+# Set LED State characteristic to 0x01 (ON)
+
+AT+BLEWRITE=2,1,"FF"
+OK
+
+# Set Brightness to 0xFF (maximum)
+```
+
+---
+
+## AT+BLEADDSVC
+
+Dynamically adds a new BLE service.
+
+<ParamField query="uuid" type="string" required>
+  Service UUID in hex format (16-bit or 128-bit)
+</ParamField>
+
+<ParamField query="name" type="string" required>
+  Service name/description
+</ParamField>
+
+### Request
+```
+AT+BLEADDSVC=<uuid>,<name>
+```
+
+### Response
+```
+OK      # Service added successfully
+ERROR   # Failed to add service
+```
+
+### Example
+```bash
+AT+BLEADDSVC=0xFFE5,"Custom Service"
+OK
+
+# New service created with UUID 0xFFE5
+```
+
+---
+
+## AT+BLEADDCHAR
+
+Adds a characteristic to an existing service.
+
+<ParamField query="svc_idx" type="integer" required>
+  Service index to add characteristic to
+</ParamField>
+
+<ParamField query="uuid" type="string" required>
+  Characteristic UUID in hex format
+</ParamField>
+
+<ParamField query="props" type="integer" required>
+  Property flags (read=1, write=2, notify=4, combinations allowed)
+</ParamField>
+
+<ParamField query="name" type="string" required>
+  Characteristic name/description
+</ParamField>
+
+### Request
+```
+AT+BLEADDCHAR=<svc_idx>,<uuid>,<props>,<name>
+```
+
+### Response
+```
+OK      # Characteristic added successfully
+ERROR   # Failed to add (invalid service or parameters)
+```
+
+### Example
+```bash
+AT+BLEADDCHAR=3,0xFFE6,6,"RGB Color"
+OK
+
+# Added RGB Color characteristic with read/write properties
+```
+
+### Property Flags
+
+| Flag | Value | Description |
+|------|-------|-------------|
+| Read | 1 | Characteristic can be read |
+| Write | 2 | Characteristic can be written |
+| Notify | 4 | Characteristic can send notifications |
+| Indicate | 8 | Characteristic can send indications |
+
+---
+
+## Unsolicited Result Codes (URCs)
+
+### +BLEGATTSRECV
+
+Sent when BLE client writes data to a characteristic.
+
+```
++BLEGATTSRECV:<hexdata>
+```
+
+<ResponseField name="hexdata" type="string">
+  Data received from BLE client as hex string
+</ResponseField>
+
+#### Example
+```bash
+# Client writes "Hello" (48656C6C6F in hex)
++BLEGATTSRECV:48656C6C6F
+
+# ESP32-C5 can process this data for lighting control
+```
+
+---
+
+## Integration with WLED
+
+BLE commands integrate with WLED through the ble_at.cpp component:
+
+```cpp
+class BLE {
+    bool begin(const char* name) {
+        // Initialize BLE stack
+        if (!ATHost_sendATWaitOK("AT+BLEINIT=2", 5000)) return false;
+        
+        // Set device name
+        char cmd[64];
+        snprintf(cmd, sizeof(cmd), "AT+BLENAME=\"%s\"", name);
+        if (!ATHost_sendATWaitOK(cmd, 1000)) return false;
+        
+        // Start advertising
+        return ATHost_sendATWaitOK("AT+BLEADVSTART", 1000);
+    }
+    
+    void loop() {
+        // Process +BLEGATTSRECV URCs
+        processIncomingData();
+    }
+};
+```
+
+This provides wireless control of WLED effects, brightness, and power state through standard BLE characteristics.

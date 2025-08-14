@@ -1,0 +1,202 @@
+---
+title: "System & OTA Commands"
+description: "AT commands for system control and firmware updates"
+---
+
+# System & OTA AT Commands
+
+System commands handle device control, debugging, and over-the-air firmware updates.
+
+## AT+RST
+
+Performs a software reset/restart of the ESP32-H2 device.
+
+### Request
+```
+AT+RST
+```
+
+### Response
+```
+OK
+[Device restarts immediately after response]
+```
+
+### Example
+```bash
+AT+RST
+OK
+
+# ESP32-H2 will restart within 100ms
+# UART connection will be lost temporarily
+```
+
+### Implementation Details
+- **Restart Time**: ~2-3 seconds for full boot sequence
+- **State Loss**: All volatile settings and statistics are reset
+- **Persistent Data**: NVS flash data (BLE bonds, etc.) is preserved
+- **Recovery**: ESP32-C5 should wait ~3 seconds before resuming communication
+
+### Use Cases
+- System recovery from error states
+- Applying configuration changes requiring restart
+- Development/debugging workflows
+- Clearing memory leaks or corrupted states
+
+---
+
+## AT+OTAUPDATE
+
+Initiates firmware update process over UART. The ESP32-H2 enters HOLD state and expects firmware binary data stream.
+
+### Request
+```
+AT+OTAUPDATE
+```
+
+### Initial Response
+```
+HOLD    # Device ready to receive firmware data
+```
+
+### Firmware Data Protocol
+
+After receiving `HOLD`, the ESP32-C5 sends:
+
+1. **Sync Pattern** (8 bytes): `0xA5A5A5A5A5A5A5A5`
+2. **Firmware Size** (4 bytes): Little-endian uint32
+3. **Firmware Data** (size bytes): Raw binary firmware image
+4. **CRC32** (4 bytes): Little-endian checksum
+
+### Final Response
+```
+OK      # Firmware update successful, device will restart
+ERROR   # Update failed (bad CRC, insufficient space, etc.)
+```
+
+### Example
+```bash
+AT+OTAUPDATE
+HOLD
+
+# ESP32-C5 now streams:
+# [0xA5A5A5A5A5A5A5A5] [size=1048576] [firmware_data...] [crc32]
+
+OK
+# ESP32-H2 restarts with new firmware
+```
+
+### Implementation Details
+- **Timeout**: 30 seconds maximum for entire update process
+- **Flash Partition**: Updates OTA partition, switches on next boot
+- **Validation**: CRC32 verification before committing update
+- **Recovery**: Rolls back to previous firmware on boot failure
+- **Size Limit**: Maximum ~1.5MB firmware size (depends on partition table)
+
+### Error Conditions
+
+| Error | Cause |
+|-------|-------|
+| Sync timeout | No sync pattern received within 5 seconds |
+| Size invalid | Firmware size > available OTA partition |
+| CRC mismatch | Corrupted data during transmission |
+| Flash error | Hardware failure writing to flash |
+
+---
+
+## AT+XSET
+
+Debug/test command for setting integer values during development.
+
+<ParamField query="value" type="integer" required>
+  Test value to store (for debugging purposes)
+</ParamField>
+
+### Request
+```
+AT+XSET=<value>
+```
+
+### Response
+```
+OK      # Value set successfully
+ERROR   # Invalid parameter
+```
+
+### Example
+```bash
+AT+XSET=42
+OK
+
+# Test variable now contains value 42
+```
+
+### Implementation Details
+- **Purpose**: Development and testing only
+- **Storage**: Volatile memory only (lost on restart)
+- **Range**: Full 32-bit signed integer range
+- **Usage**: Typically used for testing AT command framework
+
+---
+
+## OTA Integration with ESP32-C5
+
+The OTA update process is managed by the ATHost component on the ESP32-C5:
+
+```cpp
+bool ATHost_doOTA() {
+    // Send OTA update command
+    if (!ATHost_sendAT("AT+OTAUPDATE")) {
+        return false;
+    }
+    
+    // Wait for HOLD response
+    if (!ATHost_waitForResponse("HOLD", 5000)) {
+        return false;
+    }
+    
+    // Send sync pattern
+    uint8_t sync[] = {0xA5, 0xA5, 0xA5, 0xA5, 0xA5, 0xA5, 0xA5, 0xA5};
+    uart_write_bytes(UART_NUM_0, sync, sizeof(sync));
+    
+    // Send firmware size
+    uint32_t fw_size = get_firmware_size();
+    uart_write_bytes(UART_NUM_0, &fw_size, sizeof(fw_size));
+    
+    // Stream firmware data
+    stream_firmware_data();
+    
+    // Send CRC32
+    uint32_t crc = calculate_firmware_crc();
+    uart_write_bytes(UART_NUM_0, &crc, sizeof(crc));
+    
+    // Wait for completion
+    return ATHost_waitForResponse("OK", 30000);
+}
+```
+
+### OTA Workflow
+
+1. **ESP32-C5**: Downloads firmware from HTTP/HTTPS
+2. **Preparation**: Validates firmware and calculates CRC
+3. **AT+OTAUPDATE**: Initiates update on ESP32-H2
+4. **Data Stream**: Binary transfer over UART at 5Mbps
+5. **Verification**: ESP32-H2 validates CRC and flashes firmware
+6. **Restart**: ESP32-H2 boots with new firmware
+7. **Validation**: ESP32-C5 verifies successful boot and communication
+
+### Security Considerations
+
+- **Signed Firmware**: ESP32-H2 can verify cryptographic signatures
+- **Rollback**: Automatic rollback if new firmware fails to boot
+- **Checksums**: CRC32 prevents corrupted firmware installation
+- **Size Limits**: Prevents buffer overflow attacks
+
+### Performance Characteristics
+
+- **Transfer Rate**: ~500 KB/s over 5Mbaud UART
+- **Typical Update**: ~2MB firmware takes ~4 seconds to transfer
+- **Total Time**: ~10 seconds including verification and restart
+- **Reliability**: >99.9% success rate with proper error handling
+
+This OTA system enables field updates of the ESP32-H2 firmware without physical access, maintaining system reliability through comprehensive error checking and recovery mechanisms.

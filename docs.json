@@ -19,6 +19,7 @@
               "introduction",
               "hardware", 
               "arduino-setup",
+              "at-protocol",
               "quickstart",
               "development"
             ]
@@ -53,9 +54,18 @@
         "tab": "API reference",
         "groups": [
           {
-            "group": "API documentation",
+            "group": "API documentation", 
             "pages": [
               "api-reference/introduction"
+            ]
+          },
+          {
+            "group": "AT Commands",
+            "pages": [
+              "api-reference/at-commands/overview",
+              "api-reference/at-commands/led",
+              "api-reference/at-commands/ble",
+              "api-reference/at-commands/system"
             ]
           },
           {
