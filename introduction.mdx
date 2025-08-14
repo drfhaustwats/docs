@@ -1,11 +1,11 @@
 ---
-title: "Watts v2 controller"
+title: "Watts v3 controller"
 description: "Dual-MCU ESP32 outdoor lighting system with synchronized LED control across Wi-Fi and BLE interfaces"
 ---
 
 # Dual-MCU ESP32 Outdoor Lighting System
 
-This documentation covers the Watts v2 controller firmware architecture, designed as a high-performance dual-MCU outdoor lighting system with synchronized LED control and robust communication protocols.
+This documentation covers the Watts v3 controller firmware architecture, designed as a high-performance dual-MCU outdoor lighting system with synchronized LED control and robust communication protocols.
 
 ## System Architecture Overview
 
@@ -16,7 +16,7 @@ The Watts v2 controller implements a sophisticated dual-MCU topology that separa
 |                      ESP32-C5 (Main)                        |
 |  • WLED Effects Engine (Arduino component)                  |
 |  • Wi-Fi 2.4 / 5 GHz STA/AP                                 |
-|  • ParlIO TX 1-bit @ 40 MHz + VALID pin → pixel stream      |
+|  • ParlIO TX 1-bit @ 80 MHz + VALID pin → pixel stream      |
 |  • RMT-TX Channel 0,1 → Local LED Strips                    |
 |  • AT-Host task over UART0                                  |
 +-----------------------▲-------------------------------------+
@@ -37,7 +37,7 @@ The Watts v2 controller implements a sophisticated dual-MCU topology that separa
 |---|---|---|
 | **LED Channels** | Ch-0, Ch-1 (RMT-TX) | Ch-2, Ch-3 (RMT-TX) |
 | **Effects Engine** | WLED renders full RGB frame | Mirrors pixel data |
-| **Pixel Transport** | ParlIO TX, 40 MHz + VALID | ParlIO/SPI-Slave DMA RX |
+| **Pixel Transport** | ParlIO TX, 80 MHz + VALID | ParlIO/SPI-Slave DMA RX |
 | **Network Stack** | Wi-Fi 2.4/5 GHz, mDNS, HTTP(S) OTA | BLE (GAP + GATT) |
 | **AT Protocol Role** | Master / Host | Slave / Device |
 
@@ -46,7 +46,7 @@ The Watts v2 controller implements a sophisticated dual-MCU topology that separa
 ### Real-Time Synchronization
 - **Sub-5µs latency** between MCU pixel output starts
 - **Frame-locked rendering** with acknowledgment protocol
-- **40 MHz ParlIO** high-speed inter-MCU communication
+- **80 MHz ParlIO** high-speed inter-MCU communication
 
 ### Dual Network Interfaces
 - **Wi-Fi Control**: Full WLED web interface, REST API, and UDP sync
@@ -63,8 +63,8 @@ Built on proven Arduino ecosystem components:
 ## Communication Architecture
 
 The system uses three primary communication channels:
-1. **40 MHz ParlIO**: High-speed pixel data streaming
-2. **921.6k UART**: AT command protocol and firmware updates
+1. **80 MHz ParlIO**: High-speed pixel data streaming
+2. **5Mbauds UART**: AT command protocol and firmware updates
 3. **Wi-Fi/BLE**: User control interfaces
 
 ## Getting Started
