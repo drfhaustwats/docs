@@ -1,0 +1,371 @@
+---
+title: "ESP32-C5 Implementation Guide"
+description: "Complete guide to the ESP32-C5 main controller implementation with custom NeoPixelBus driver and WLED integration"
+---
+
+# ESP32-C5 Implementation Guide
+
+The ESP32-C5 serves as the main controller in the Watts v3 dual-MCU system, running WLED with a custom NeoPixelBus driver that seamlessly distributes LED channels across both MCUs.
+
+## Architecture Overview
+
+The ESP32-C5 implementation uses a hybrid approach for LED control:
+
+```
+┌─────────────────────────────────────────────────────────┐
+│                    ESP32-C5 Main Controller             │
+├─────────────────────────────────────────────────────────┤
+│  WLED Effects Engine                                    │
+│  ├─ Channel 0 ──┐                                      │
+│  ├─ Channel 1 ──┤                                      │
+│  ├─ Channel 2 ──┤                                      │
+│  └─ Channel 3 ──┘                                      │
+│                 │                                       │
+│  ┌──────────────▼─────────────────┐                    │
+│  │   Shared Manager               │                    │
+│  │  ├─ Channel 0 ── RMT 0 ── Local LED Strip          │
+│  │  ├─ Channel 1 ── RMT 1 ── Local LED Strip          │
+│  │  ├─ Channel 2 ──┐                                  │
+│  │  └─ Channel 3 ──┘                                  │
+│  │                 │                                   │
+│  │  ┌──────────────▼─────────────┐                    │
+│  │  │   80MHz ParlIO TX          │                    │
+│  │  │   AT Command Coordination  │                    │
+│  │  │   CRC16 Frame Validation   │                    │
+│  │  └─────────────┬──────────────┘                    │
+│  └────────────────┼────────────────────────────────────┘
+│                   │ 80MHz ParlIO Stream                │
+└───────────────────┼────────────────────────────────────┘
+                    ▼
+         ESP32-H2 (Channels 2-3)
+```
+
+## Custom NeoPixelBus Driver
+
+### Shared Manager Architecture
+
+The heart of the system is the `NeoEsp32ParlC5SharedManager` class, which manages all four LED channels through a singleton pattern. All channels route through the shared manager - channels 0-1 output via local RMT, while channels 2-3 are distributed to the ESP32-H2 via ParlIO:
+
+```cpp
+// File: components/NeoPixelBus/src/internal/methods/NeoEsp32ParlC5SharedManager.h
+
+class NeoEsp32ParlC5SharedManager {
+private:
+    static NeoEsp32ParlC5SharedManager* _instance;
+    
+    // Channel management
+    struct ChannelInfo {
+        bool registered;
+        uint16_t pixelCount;
+        uint8_t* pixels;
+        bool isDirty;
+    };
+    
+    ChannelInfo _channels[4];  // 4 channels: 0-1 local, 2-3 distributed
+    
+    // Hardware configuration
+    parlio_tx_unit_handle_t _parlio_unit;
+    rmt_channel_handle_t _rmt_channels[2];  // Local channels only
+    
+    // AT command integration
+    uint16_t _lastCh2, _lastCh3;  // Optimization: only send if changed
+};
+```
+
+### Channel Method Classes
+
+Four separate method classes provide identical APIs, but all route through the shared manager for centralized control:
+
+```cpp
+// File: components/NeoPixelBus/src/internal/methods/NeoEsp32ParlC5X4Methods.h
+
+// All channels route through shared manager
+class NeoEsp32ParlC5Ch0Method;  // Channel 0 → Shared Manager → Local RMT
+class NeoEsp32ParlC5Ch1Method;  // Channel 1 → Shared Manager → Local RMT
+class NeoEsp32ParlC5Ch2Method;  // Channel 2 → Shared Manager → ParlIO to H2
+class NeoEsp32ParlC5Ch3Method;  // Channel 3 → Shared Manager → ParlIO to H2
+```
+
+Each method class implements the standard NeoPixelBus interface:
+- `Begin()` - Initialize hardware/register with shared manager
+- `End()` - Clean up resources
+- `Update()` - Trigger frame transmission
+- `SetPixelColor()` - Set pixel data with dirty tracking
+
+## WLED Integration
+
+### Bus Type Definitions
+
+The system extends WLED's bus wrapper with new channel types:
+
+```cpp
+// File: components/wled/bus_wrapper.h (Lines 164-175)
+
+// RGB Channel Types
+#define I_32_PC5_CH0_3 63  // ParlIO Channel 0 RGB
+#define I_32_PC5_CH1_3 64  // ParlIO Channel 1 RGB  
+#define I_32_PC5_CH2_3 65  // ParlIO Channel 2 RGB (Distributed)
+#define I_32_PC5_CH3_3 66  // ParlIO Channel 3 RGB (Distributed)
+
+// RGBW Channel Types
+#define I_32_PC5_CH0_4 67  // ParlIO Channel 0 RGBW
+#define I_32_PC5_CH1_4 68  // ParlIO Channel 1 RGBW
+#define I_32_PC5_CH2_4 69  // ParlIO Channel 2 RGBW (Distributed)
+#define I_32_PC5_CH3_4 70  // ParlIO Channel 3 RGBW (Distributed)
+```
+
+### Bus Creation Logic
+
+WLED automatically distributes LED strips across available channels:
+
+```cpp
+// File: components/wled/bus_wrapper.h (Lines 796-818)
+
+#if defined(CONFIG_IDF_TARGET_ESP32C5)
+uint8_t channel = num % 4; // Round-robin distribution
+
+switch (busType) {
+    case TYPE_WS2812_RGB:
+        return I_32_PC5_CH0_3 + channel;  // Auto-distribute RGB
+    case TYPE_SK6812_RGBW:
+        return I_32_PC5_CH0_4 + channel;  // Auto-distribute RGBW
+}
+#endif
+```
+
+This ensures that multiple LED strips are automatically distributed across all four available channels for optimal performance.
+
+### Bus Manager Optimizations
+
+The bus manager includes performance optimizations for the dual-MCU system:
+
+```cpp
+// File: components/wled/bus_manager.cpp
+
+// Optimized data types for inner loops
+uint_fast8_t r, g, b, w;
+uint_fast16_t pix;
+
+// Channel caching for repeated operations  
+static Bus* lastBus = nullptr;
+if (lastBus && lastBus->getLength() > i) {
+    lastBus->setPixelColor(i, col);
+}
+```
+
+## Frame Synchronization Protocol
+
+### AT Command Integration
+
+The shared manager coordinates with ESP32-H2 via AT commands:
+
+```cpp
+// File: components/NeoPixelBus/src/internal/methods/NeoEsp32ParlC5SharedManager.h
+
+void _sendH2PrepCommand() {
+    uint16_t ch2_pixels = _channels[2].registered ? _channels[2].pixelCount : 0;
+    uint16_t ch3_pixels = _channels[3].registered ? _channels[3].pixelCount : 0;
+    
+    // Optimization: only send if pixel counts changed
+    if (ch2_pixels == _lastCh2 && ch3_pixels == _lastCh3) return;
+    _lastCh2 = ch2_pixels;
+    _lastCh3 = ch3_pixels;
+
+    char cmd[64];
+    snprintf(cmd, sizeof(cmd), "AT+LED_PREP=%d,%d", ch2_pixels, ch3_pixels);
+
+    bool success = ATHost_sendATWaitOK(cmd, 1000); // 1000ms timeout
+    if (!success) {
+        ESP_LOGW(TAG, "Failed to send LED_PREP to H2");
+        _handleH2CommunicationError();
+    }
+}
+```
+
+### Frame Data Protocol
+
+When channels 2-3 need updates, the system transmits frame data via 80MHz ParlIO:
+
+```cpp
+// Frame header structure
+struct led_frame_header_t {
+    uint16_t magic;        // 0x4C45 ("LE" - Little Endian marker)
+    uint16_t ch2_pixels;   // Channel 2 pixel count
+    uint16_t ch3_pixels;   // Channel 3 pixel count  
+    uint16_t crc16;        // CRC16-CCITT of pixel data
+};
+
+// Followed by pixel data:
+// - Channel 2 pixels (ch2_pixels × 4 bytes RGB/W)
+// - Channel 3 pixels (ch3_pixels × 4 bytes RGB/W)
+```
+
+### Hardware Configuration
+
+The ParlIO interface is configured for high-speed data transmission:
+
+```cpp
+// ParlIO Configuration
+parlio_tx_unit_config_t config = {
+    .clk_src = PARLIO_CLK_SRC_DEFAULT,  // 80MHz source
+    .resolution_hz = 80000000,          // 80MHz operation  
+    .data_width = 1,                    // 1-bit serial
+    .idle_value = 0,                    // Idle low
+    .trans_queue_depth = 4,             // Transaction queue
+};
+
+// GPIO Configuration  
+parlio_tx_gpio_config_t gpio_config = {
+    .clk_out_pin = GPIO_NUM_10,    // Clock to ESP32-H2
+    .valid_pin = GPIO_NUM_25,      // Frame valid signal
+    .data_pins = {GPIO_NUM_26},    // Data pin (WLED 3rd output)
+};
+```
+
+## Performance Characteristics
+
+### Timing Analysis
+
+The system achieves sub-millisecond synchronization between MCUs:
+
+| Operation | Timing | Description |
+|-----------|---------|------------|
+| **AT+LED_PREP** | &lt;1ms | H2 preparation command |
+| **ParlIO Transmission** | ~100µs | Frame data @ 80MHz |
+| **H2 Processing** | &lt;5µs | SPI→RMT pipeline |
+| **Total Coordination** | &lt;1.2ms | End-to-end sync |
+
+### Memory Management
+
+```cpp
+// DMA-capable buffer allocation
+void* allocateDMABuffer(size_t size) {
+    return heap_caps_aligned_alloc(
+        64,                           // 64-byte alignment
+        size, 
+        MALLOC_CAP_DMA | MALLOC_CAP_8BIT
+    );
+}
+
+// CRC16-CCITT validation
+uint16_t calculateCRC16(const uint8_t* data, size_t length) {
+    uint16_t crc = 0xFFFF;
+    for (size_t i = 0; i < length; i++) {
+        crc ^= (uint16_t)data[i] << 8;
+        for (int j = 0; j < 8; j++) {
+            crc = (crc & 0x8000) ? (crc << 1) ^ 0x1021 : crc << 1;
+        }
+    }
+    return crc;
+}
+```
+
+## Configuration Examples
+
+### Basic WLED Setup
+
+Configure WLED to use the distributed LED system:
+
+1. **Hardware Configuration**:
+   - Set GPIO 26 as LED output pin (3rd output in WLED UI)
+   - This automatically becomes the ParlIO data pin
+   - GPIO 25 is hardcoded as ParlIO VALID signal
+
+2. **LED Strip Setup**:
+   ```json
+   // WLED strips automatically distribute across 4 channels
+   "strip": [
+       {"pin": 18, "count": 150, "type": "WS2812"},  // Channel 0 (local)
+       {"pin": 19, "count": 200, "type": "WS2812"},  // Channel 1 (local)  
+       {"pin": 26, "count": 100, "type": "WS2812"},  // Channel 2 (distributed)
+       {"pin": 25, "count": 180, "type": "WS2812"}   // Channel 3 (distributed)
+   ]
+   ```
+
+3. **Channel 4 Configuration**:
+   - Assign GPIO 25 to Channel 4 in WLED (placeholder)
+   - This pin is actually used for ParlIO VALID signal
+   - The assignment satisfies WLED's requirement for a pin per channel
+
+### Advanced Configuration
+
+For high-performance applications:
+
+```cpp
+// Custom frame rates
+#define WLED_FPS 60                    // Target 60 FPS
+#define MAX_PIXELS_PER_CHANNEL 1000    // Maximum pixels per channel
+#define FRAME_TIMEOUT_MS 16            // ~60 FPS timeout
+
+// Memory optimization
+#define ENABLE_DIRTY_TRACKING 1        // Only update changed pixels
+#define ENABLE_CRC_VALIDATION 1        // Frame integrity checking
+#define ENABLE_H2_RECOVERY 1           // Automatic error recovery
+```
+
+## Error Handling & Recovery
+
+### Communication Error Recovery
+
+The system includes comprehensive error handling:
+
+```cpp
+void _handleH2CommunicationError() {
+    _errorCount++;
+    
+    if (_errorCount > MAX_ERRORS) {
+        ESP_LOGE(TAG, "Too many H2 errors, disabling distributed mode");
+        _distributedMode = false;
+        
+        // Fallback: route channels 2-3 to local outputs
+        _enableFallbackMode();
+    }
+    
+    // Attempt recovery
+    if (_errorCount % RECOVERY_INTERVAL == 0) {
+        ESP_LOGI(TAG, "Attempting H2 recovery...");
+        _attemptH2Recovery();
+    }
+}
+```
+
+### Hardware Error Handling
+
+- **RMT Channel Recovery**: Automatic reinitialization on hardware failures
+- **ParlIO Recovery**: Reset and reconfigure on transmission errors  
+- **Memory Leak Prevention**: Proper cleanup on channel deregistration
+- **Watchdog Integration**: Prevents system lockup on communication failures
+
+## Build Configuration
+
+### Required Components
+
+Add these components to your main `CMakeLists.txt`:
+
+```cmake
+idf_component_register(
+    SRCS "main.cpp"
+    INCLUDE_DIRS ""
+    REQUIRES arduino log esp_driver_parlio esp_driver_rmt
+    PRIV_REQUIRES 
+        ESPAsyncWebServer 
+        AsyncTCP 
+        athost 
+        NeoPixelBus 
+        FastLED 
+        wled
+)
+```
+
+### ESP-IDF Configuration
+
+Enable required drivers in `sdkconfig`:
+
+```
+CONFIG_SOC_PARLIO_SUPPORTED=y
+CONFIG_SOC_RMT_SUPPORTED=y  
+CONFIG_ESP_DEFAULT_CPU_FREQ_240=y
+CONFIG_FREERTOS_HZ=1000
+```
+
+This implementation provides a seamless way to expand WLED's LED control capabilities across multiple MCUs while maintaining full compatibility with existing WLED features and effects.
