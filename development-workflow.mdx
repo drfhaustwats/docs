@@ -1,0 +1,995 @@
+---
+title: "Development Workflow"
+description: "Complete guide to setting up build environments, debugging dual-MCU systems, OTA procedures, and testing strategies for the Watts v3 controller"
+---
+
+# Development Workflow
+
+This chapter covers the complete development workflow for the Watts v3 dual-MCU lighting system, from initial setup through deployment and maintenance.
+
+## Build Environment Setup
+
+### Prerequisites
+
+**Required Software:**
+- **ESP-IDF v5.1+** - ESP32 development framework
+- **Arduino IDE 2.0+** or **PlatformIO** - For Arduino as Component development
+- **Git** - Version control
+- **Python 3.8+** - ESP-IDF dependency
+- **CMake 3.16+** - Build system
+- **Ninja** - Build tool (recommended)
+
+**Hardware Requirements:**
+- ESP32-C5 development board with USB-C connector
+- ESP32-H2 development board with USB-C connector  
+- Logic analyzer (optional, for protocol debugging)
+- Oscilloscope (optional, for signal timing analysis)
+
+### ESP32-C5 Arduino Environment
+
+**Directory Structure:**
+```
+watts-v3-controller/
+├── esp32-c5-main/
+│   ├── main/
+│   │   ├── esp32-c5-main.ino
+│   │   ├── NeoPixelBusH2.h
+│   │   ├── NeoPixelBusH2.cpp
+│   │   └── ATHost.h
+│   ├── components/
+│   │   └── arduino/         # Arduino as Component
+│   ├── CMakeLists.txt
+│   └── sdkconfig
+└── esp32-h2-at/
+    ├── main/
+    ├── components/
+    └── CMakeLists.txt
+```
+
+**Arduino as Component Setup:**
+
+1. **Clone Arduino ESP32 Core:**
+```bash
+cd esp32-c5-main/components
+git clone --recursive https://github.com/espressif/arduino-esp32.git arduino
+cd arduino
+git checkout tags/2.0.14  # Use stable release
+```
+
+2. **Configure CMakeLists.txt:**
+```cmake
+# esp32-c5-main/CMakeLists.txt
+cmake_minimum_required(VERSION 3.16)
+
+# Arduino as Component configuration
+set(EXTRA_COMPONENT_DIRS "components/arduino")
+set(ARDUINO_BOARD "ESP32C5_DEV")
+
+include($ENV{IDF_PATH}/tools/cmake/project.cmake)
+project(esp32-c5-main)
+```
+
+3. **Main Component Configuration:**
+```cmake
+# esp32-c5-main/main/CMakeLists.txt
+idf_component_register(
+    SRCS "esp32-c5-main.ino"
+         "NeoPixelBusH2.cpp"
+         "ATHost.cpp"
+    INCLUDE_DIRS "."
+    REQUIRES arduino
+             esp_driver_uart
+             esp_driver_rmt
+             esp_driver_gpio
+)
+```
+
+**Arduino as Component Configuration:**
+
+Create `sdkconfig.defaults` for consistent ESP32-C5 builds:
+
+```bash
+# esp32-c5-main/sdkconfig.defaults
+# Target configuration
+CONFIG_IDF_TARGET="esp32c5"
+
+# Arduino as Component configuration
+CONFIG_ARDUINO_RUNNING_CORE=1
+CONFIG_ARDUINO_LOOP_STACK_SIZE=8192
+CONFIG_ARDUINO_EVENT_RUNNING_CORE=1
+CONFIG_ARDUINO_EVENT_STACK_SIZE=4096
+CONFIG_ARDUINO_UDP_RUNNING_CORE=1
+CONFIG_ARDUINO_UDP_TASK_PRIORITY=3
+
+# Enable Arduino features needed for NeoPixelBus
+CONFIG_ARDUINO_ENABLE_WDT=y
+CONFIG_ARDUINO_WDT_TIMEOUT=5000
+CONFIG_ARDUINO_AUTOSTART_ARDUINO=y
+
+# ESP32-C5 specific configurations
+CONFIG_ESP_DEFAULT_CPU_FREQ_240=y
+CONFIG_COMPILER_OPTIMIZATION_PERF=y
+
+# UART configuration for AT communication
+CONFIG_ESP_CONSOLE_UART_BAUDRATE=115200
+CONFIG_ESP_CONSOLE_UART_NUM=0
+
+# GPIO and driver configuration
+CONFIG_ESP_DRIVER_GPIO_ENABLE_DEBUG_LOG=n
+CONFIG_ESP_DRIVER_RMT_ENABLE_DEBUG_LOG=n
+CONFIG_ESP_DRIVER_UART_ENABLE_DEBUG_LOG=n
+
+# Memory configuration
+CONFIG_ESP_MAIN_TASK_STACK_SIZE=8192
+CONFIG_ESP_SYSTEM_EVENT_TASK_STACK_SIZE=4096
+
+# ParlIO configuration for high-speed LED data
+CONFIG_ESP_DRIVER_PARLIO_ENABLE_DEBUG_LOG=n
+
+# Flash configuration
+CONFIG_ESPTOOLPY_FLASHSIZE_4MB=y
+CONFIG_PARTITION_TABLE_SINGLE_APP=y
+
+# WiFi configuration (if needed for future features)
+CONFIG_ESP32_WIFI_ENABLED=y
+CONFIG_ESP32_WIFI_STATIC_RX_BUFFER_NUM=4
+CONFIG_ESP32_WIFI_DYNAMIC_RX_BUFFER_NUM=8
+```
+
+**Build Commands:**
+```bash
+# Set target and build (sdkconfig.defaults automatically applied)
+cd esp32-c5-main
+idf.py set-target esp32c5
+idf.py build
+idf.py flash monitor
+```
+
+### ESP32-H2 ESP-IDF Environment
+
+**Project Structure:**
+```
+esp32-h2-at/
+├── main/
+│   ├── EspAt_firmware.c
+│   ├── cat.c               # Tiny-CAT parser
+│   ├── ble_at_handler.c    # BLE commands
+│   ├── gatt_svc.c          # GATT services
+│   ├── gap.c               # GAP management
+│   ├── at_led_commands.c   # LED commands
+│   ├── spi_led_controller.c # SPI slave
+│   ├── led_strip_encoder.c # RMT encoder
+│   └── ota.c               # OTA handler
+├── components/
+│   └── tiny_cat/           # AT parser library
+├── partitions.csv
+├── sdkconfig.defaults
+└── CMakeLists.txt
+```
+
+**ESP-IDF Configuration:**
+
+Create `sdkconfig.defaults` for automated configuration:
+
+```bash
+# esp32-h2-at/sdkconfig.defaults
+# Target configuration
+CONFIG_IDF_TARGET="esp32h2"
+
+# Bluetooth configuration
+CONFIG_BT_ENABLED=y
+CONFIG_BT_NIMBLE_ENABLED=y
+CONFIG_BT_NIMBLE_ROLE_PERIPHERAL=y
+CONFIG_BT_NIMBLE_ROLE_CENTRAL=n
+CONFIG_BT_NIMBLE_MAX_CONNECTIONS=1
+CONFIG_BT_NIMBLE_MAX_CCCDS=8
+CONFIG_BT_NIMBLE_HOST_TASK_STACK_SIZE=4096
+
+# FreeRTOS configuration
+CONFIG_FREERTOS_HZ=1000
+CONFIG_ESP_TASK_WDT_EN=y
+CONFIG_ESP_SYSTEM_EVENT_TASK_STACK_SIZE=4096
+
+# Flash and partition configuration
+CONFIG_ESPTOOLPY_FLASHSIZE_4MB=y
+CONFIG_PARTITION_TABLE_CUSTOM=y
+CONFIG_PARTITION_TABLE_CUSTOM_FILENAME="partitions.csv"
+
+# UART configuration for high-speed AT communication
+CONFIG_ESP_CONSOLE_UART_BAUDRATE=115200
+CONFIG_ESP_CONSOLE_UART_NUM=0
+
+# Memory optimization
+CONFIG_ESP_DEFAULT_CPU_FREQ_96=y
+CONFIG_COMPILER_OPTIMIZATION_SIZE=y
+
+# Security features
+CONFIG_SECURE_BOOT=n
+CONFIG_SECURE_FLASH_ENC_ENABLED=n
+
+# SPI configuration for LED controller
+CONFIG_ESP_DRIVER_SPI_MASTER_ISR_IN_IRAM=y
+CONFIG_ESP_DRIVER_SPI_SLAVE_ISR_IN_IRAM=y
+
+# RMT configuration for LED output
+CONFIG_ESP_DRIVER_RMT_ENABLE_DEBUG_LOG=n
+```
+
+**Build Commands:**
+```bash
+# Set target and build (sdkconfig.defaults automatically applied)
+cd esp32-h2-at
+idf.py set-target esp32h2
+idf.py build
+idf.py flash monitor
+```
+
+**Custom Partition Table:**
+```csv
+# esp32-h2-at/partitions.csv
+# Name,     Type, SubType, Offset,  Size, Flags
+nvs,        data, nvs,     0x9000,  0x6000,
+phy_init,   data, phy,     0xf000,  0x1000,
+factory,    app,  factory, 0x10000, 0x180000,
+ota_0,      app,  ota_0,   0x190000,0x180000,
+ota_1,      app,  ota_1,   0x310000,0x180000,
+ota_data,   data, ota,     0x490000,0x2000,
+```
+
+## Cross-Platform Build Scripts
+
+### Unified Build System
+
+**File**: `build-all.py`
+```python
+#!/usr/bin/env python3
+"""
+Unified build script for Watts v3 dual-MCU system
+Supports both Windows and Linux development environments
+"""
+
+import os
+import sys
+import subprocess
+import argparse
+from pathlib import Path
+
+class DualMCUBuilder:
+    def __init__(self, project_root):
+        self.project_root = Path(project_root)
+        self.c5_path = self.project_root / "esp32-c5-main"
+        self.h2_path = self.project_root / "esp32-h2-at"
+        
+    def build_c5(self, clean=False):
+        """Build ESP32-C5 Arduino firmware"""
+        print("🔨 Building ESP32-C5 firmware...")
+        os.chdir(self.c5_path)
+        
+        if clean:
+            subprocess.run(["idf.py", "fullclean"], check=True)
+            
+        # Configure and build
+        subprocess.run(["idf.py", "set-target", "esp32c5"], check=True)
+        subprocess.run(["idf.py", "build"], check=True)
+        
+        print("✅ ESP32-C5 build complete")
+        
+    def build_h2(self, clean=False):
+        """Build ESP32-H2 AT firmware"""
+        print("🔨 Building ESP32-H2 firmware...")
+        os.chdir(self.h2_path)
+        
+        if clean:
+            subprocess.run(["idf.py", "fullclean"], check=True)
+            
+        # Configure and build
+        subprocess.run(["idf.py", "set-target", "esp32h2"], check=True)
+        subprocess.run(["idf.py", "build"], check=True)
+        
+        print("✅ ESP32-H2 build complete")
+        
+    def flash_c5(self, monitor=False):
+        """Flash ESP32-C5 firmware"""
+        print("📱 Flashing ESP32-C5...")
+        os.chdir(self.c5_path)
+        
+        cmd = ["idf.py", "flash"]
+        if monitor:
+            cmd.append("monitor")
+            
+        subprocess.run(cmd, check=True)
+        
+    def flash_h2(self, monitor=False):
+        """Flash ESP32-H2 firmware"""
+        print("📱 Flashing ESP32-H2...")
+        os.chdir(self.h2_path)
+        
+        cmd = ["idf.py", "flash"]
+        if monitor:
+            cmd.append("monitor")
+            
+        subprocess.run(cmd, check=True)
+        
+    def run_tests(self):
+        """Run automated test suite"""
+        print("🧪 Running test suite...")
+        
+        # Unit tests for AT commands
+        os.chdir(self.h2_path)
+        subprocess.run(["python", "tests/test_at_commands.py"], check=True)
+        
+        # Integration tests
+        subprocess.run(["python", "tests/test_dual_mcu_integration.py"], check=True)
+        
+        print("✅ All tests passed")
+
+def main():
+    parser = argparse.ArgumentParser(description="Watts v3 build system")
+    parser.add_argument("--clean", action="store_true", help="Clean before build")
+    parser.add_argument("--c5-only", action="store_true", help="Build C5 only")
+    parser.add_argument("--h2-only", action="store_true", help="Build H2 only")
+    parser.add_argument("--flash", action="store_true", help="Flash after build")
+    parser.add_argument("--monitor", action="store_true", help="Monitor after flash")
+    parser.add_argument("--test", action="store_true", help="Run tests")
+    
+    args = parser.parse_args()
+    
+    builder = DualMCUBuilder(".")
+    
+    try:
+        if args.c5_only:
+            builder.build_c5(args.clean)
+            if args.flash:
+                builder.flash_c5(args.monitor)
+        elif args.h2_only:
+            builder.build_h2(args.clean)
+            if args.flash:
+                builder.flash_h2(args.monitor)
+        else:
+            # Build both
+            builder.build_c5(args.clean)
+            builder.build_h2(args.clean)
+            
+            if args.flash:
+                print("🚨 Flash both MCUs manually with --c5-only/--h2-only")
+                
+        if args.test:
+            builder.run_tests()
+            
+    except subprocess.CalledProcessError as e:
+        print(f"❌ Build failed: {e}")
+        sys.exit(1)
+
+if __name__ == "__main__":
+    main()
+```
+
+**Usage Examples:**
+```bash
+# Build both MCUs
+python build-all.py
+
+# Clean build C5 and flash with monitor
+python build-all.py --c5-only --clean --flash --monitor
+
+# Build and test H2
+python build-all.py --h2-only --test
+
+# Complete workflow
+python build-all.py --clean --test
+```
+
+## Debugging Dual-MCU Systems
+
+### Serial Monitor Setup
+
+**Multi-Terminal Debugging:**
+
+**Terminal 1 - ESP32-C5:**
+```bash
+# Monitor C5 main controller
+cd esp32-c5-main
+idf.py monitor --port /dev/ttyUSB0
+# Windows: idf.py monitor --port COM3
+```
+
+**Terminal 2 - ESP32-H2:**
+```bash
+# Monitor H2 AT controller
+cd esp32-h2-at  
+idf.py monitor --port /dev/ttyUSB1
+# Windows: idf.py monitor --port COM4
+```
+
+**Terminal 3 - AT Communication:**
+```bash
+# Monitor AT command flow between MCUs
+python tools/at_monitor.py --c5-port /dev/ttyUSB0 --h2-port /dev/ttyUSB1
+```
+
+### AT Command Flow Debugger
+
+**File**: `tools/at_monitor.py`
+```python
+#!/usr/bin/env python3
+"""
+Real-time AT command flow monitor for dual-MCU debugging
+"""
+
+import serial
+import threading
+import time
+import re
+from datetime import datetime
+
+class ATFlowMonitor:
+    def __init__(self, c5_port, h2_port, baudrate=115200):
+        self.c5_serial = serial.Serial(c5_port, baudrate, timeout=0.1)
+        self.h2_serial = serial.Serial(h2_port, baudrate, timeout=0.1)
+        self.running = False
+        
+    def start_monitoring(self):
+        """Start monitoring both serial ports"""
+        self.running = True
+        
+        # Start monitoring threads
+        threading.Thread(target=self._monitor_c5, daemon=True).start()
+        threading.Thread(target=self._monitor_h2, daemon=True).start()
+        
+        print("🔍 AT Flow Monitor started")
+        print("📡 C5 (Main) | 📱 H2 (AT)")
+        print("-" * 50)
+        
+        try:
+            while self.running:
+                time.sleep(0.1)
+        except KeyboardInterrupt:
+            self.stop_monitoring()
+            
+    def _monitor_c5(self):
+        """Monitor C5 serial output"""
+        buffer = ""
+        while self.running:
+            try:
+                data = self.c5_serial.read(64).decode('utf-8', errors='ignore')
+                if data:
+                    buffer += data
+                    lines = buffer.split('\n')
+                    buffer = lines[-1]  # Keep incomplete line
+                    
+                    for line in lines[:-1]:
+                        if line.strip():
+                            self._process_c5_line(line.strip())
+            except:
+                pass
+                
+    def _monitor_h2(self):
+        """Monitor H2 serial output"""
+        buffer = ""
+        while self.running:
+            try:
+                data = self.h2_serial.read(64).decode('utf-8', errors='ignore')
+                if data:
+                    buffer += data
+                    lines = buffer.split('\n')
+                    buffer = lines[-1]
+                    
+                    for line in lines[:-1]:
+                        if line.strip():
+                            self._process_h2_line(line.strip())
+            except:
+                pass
+                
+    def _process_c5_line(self, line):
+        """Process C5 log line"""
+        timestamp = datetime.now().strftime("%H:%M:%S.%f")[:-3]
+        
+        # Detect AT commands being sent
+        if "AT+" in line:
+            print(f"📡 {timestamp} C5→H2: {line}")
+        elif "ATHost" in line or "NeoPixelBus" in line:
+            print(f"📡 {timestamp} C5: {line}")
+            
+    def _process_h2_line(self, line):
+        """Process H2 log line"""
+        timestamp = datetime.now().strftime("%H:%M:%S.%f")[:-3]
+        
+        # Detect AT responses and URCs
+        if line.startswith('+') or line in ['OK', 'ERROR']:
+            print(f"📱 {timestamp} H2→C5: {line}")
+        elif "cat_" in line or "BLE" in line or "LED" in line:
+            print(f"📱 {timestamp} H2: {line}")
+            
+    def stop_monitoring(self):
+        """Stop monitoring"""
+        self.running = False
+        self.c5_serial.close()
+        self.h2_serial.close()
+        print("\n🛑 Monitoring stopped")
+
+if __name__ == "__main__":
+    import argparse
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--c5-port", required=True, help="C5 serial port")
+    parser.add_argument("--h2-port", required=True, help="H2 serial port")
+    args = parser.parse_args()
+    
+    monitor = ATFlowMonitor(args.c5_port, args.h2_port)
+    monitor.start_monitoring()
+```
+
+### Logic Analyzer Configuration
+
+**Recommended Channels:**
+1. **UART TX (C5→H2)** - AT commands
+2. **UART RX (H2→C5)** - AT responses
+3. **UART CTS/RTS** - Flow control
+4. **SPI CLK** - 80MHz frame clock
+5. **SPI MOSI** - Frame data
+6. **SPI CS** - Frame valid signal
+7. **LED CH2 Output** - RMT channel 2
+8. **LED CH3 Output** - RMT channel 3
+
+**Trigger Configuration:**
+```
+# AT Command Analysis
+Trigger: UART TX edge, decode: UART (5Mbaud, 8N1)
+
+# Frame Data Analysis  
+Trigger: SPI CS falling edge, decode: SPI (80MHz, Mode 0)
+
+# LED Output Timing
+Trigger: LED output rising edge, timebase: 100ns/div
+```
+
+## OTA Update Procedures
+
+### Over-UART Firmware Updates
+
+**OTA Update Flow:**
+```
+C5 Controller                    H2 AT Firmware
+│                                │
+├─ 1. Send AT+OTAUPDATE ────────→│
+│                                ├─ 2. Enter HOLD state
+│                                ├─ 3. Wait for sync pattern
+├─ 4. Send sync: C0 FF FE AA 55 90│
+│                                ├─ 5. Begin OTA partition
+├─ 6. Stream firmware binary ────→│
+│    (1KB chunks with CRC)       ├─ 7. Validate and write
+│                                ├─ 8. Set boot partition
+├─ 9. Receive "OK" response ←────┤
+│                                ├─ 10. Restart ESP32-H2
+└─ 11. Re-initialize AT ─────────→│
+```
+
+### OTA Client Implementation
+
+**File**: `tools/ota_update.py`
+```python
+#!/usr/bin/env python3
+"""
+OTA firmware update tool for ESP32-H2 via UART
+"""
+
+import serial
+import time
+import struct
+import binascii
+from pathlib import Path
+
+class H2OTAUpdater:
+    def __init__(self, serial_port, baudrate=5000000):
+        self.serial = serial.Serial(serial_port, baudrate, timeout=30)
+        self.sync_pattern = b'\xC0\xFF\xFE\xAA\x55\x90'
+        
+    def update_firmware(self, firmware_path):
+        """Update H2 firmware via OTA"""
+        firmware = Path(firmware_path).read_bytes()
+        
+        print(f"📦 Firmware size: {len(firmware)} bytes")
+        
+        # 1. Send OTA command
+        print("🚀 Starting OTA update...")
+        self.serial.write(b"AT+OTAUPDATE\r\n")
+        
+        # Wait for HOLD state confirmation
+        response = self._read_response(timeout=5)
+        if "HOLD" not in response:
+            raise Exception(f"OTA start failed: {response}")
+            
+        # 2. Send sync pattern
+        print("🔄 Sending sync pattern...")
+        time.sleep(0.1)
+        self.serial.write(self.sync_pattern)
+        
+        # 3. Stream firmware in 1KB chunks
+        chunk_size = 1024
+        total_chunks = (len(firmware) + chunk_size - 1) // chunk_size
+        
+        for i in range(total_chunks):
+            start = i * chunk_size
+            end = min(start + chunk_size, len(firmware))
+            chunk = firmware[start:end]
+            
+            # Send chunk with length prefix
+            chunk_header = struct.pack('<H', len(chunk))
+            self.serial.write(chunk_header + chunk)
+            
+            # Progress indicator
+            progress = (i + 1) / total_chunks * 100
+            print(f"📊 Progress: {progress:.1f}% ({i+1}/{total_chunks})", end='\r')
+            
+        print("\n✅ Firmware transmission complete")
+        
+        # 4. Wait for completion
+        print("⏳ Waiting for OTA completion...")
+        response = self._read_response(timeout=60)
+        
+        if "OK" in response:
+            print("🎉 OTA update successful!")
+            print("⚡ ESP32-H2 will restart automatically")
+            return True
+        else:
+            print(f"❌ OTA update failed: {response}")
+            return False
+            
+    def _read_response(self, timeout=10):
+        """Read AT response with timeout"""
+        start_time = time.time()
+        response = ""
+        
+        while time.time() - start_time < timeout:
+            if self.serial.in_waiting:
+                data = self.serial.read(self.serial.in_waiting).decode('utf-8', errors='ignore')
+                response += data
+                
+                if '\n' in response:
+                    break
+                    
+            time.sleep(0.01)
+            
+        return response.strip()
+
+# Usage example
+if __name__ == "__main__":
+    import sys
+    
+    if len(sys.argv) != 3:
+        print("Usage: python ota_update.py <port> <firmware.bin>")
+        sys.exit(1)
+        
+    port = sys.argv[1]
+    firmware = sys.argv[2]
+    
+    updater = H2OTAUpdater(port)
+    success = updater.update_firmware(firmware)
+    
+    sys.exit(0 if success else 1)
+```
+
+**OTA Update Script:**
+```bash
+#!/bin/bash
+# update_h2.sh - Complete H2 OTA update workflow
+
+set -e
+
+H2_PORT=${1:-/dev/ttyUSB1}
+FIRMWARE_PATH="esp32-h2-at/build/EspAt_firmware.bin"
+
+echo "🔧 Building latest H2 firmware..."
+cd esp32-h2-at
+idf.py build
+
+echo "📡 Starting OTA update on $H2_PORT..."
+cd ..
+python tools/ota_update.py "$H2_PORT" "$FIRMWARE_PATH"
+
+echo "⏳ Waiting for H2 restart..."
+sleep 5
+
+echo "🔍 Testing AT communication..."
+python tools/test_at_basic.py "$H2_PORT"
+
+echo "✅ H2 OTA update complete!"
+```
+
+## Testing Strategies
+
+### Automated Test Suite
+
+**Test Categories:**
+
+1. **Unit Tests** - Individual component testing
+2. **Integration Tests** - MCU communication testing  
+3. **Performance Tests** - Timing and throughput
+4. **Stress Tests** - Extended operation and error recovery
+
+### AT Command Testing
+
+**File**: `tests/test_at_commands.py`
+```python
+#!/usr/bin/env python3
+"""
+Comprehensive AT command test suite
+"""
+
+import unittest
+import serial
+import time
+import json
+
+class ATCommandTests(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls):
+        cls.serial = serial.Serial('/dev/ttyUSB1', 5000000, timeout=2)
+        time.sleep(1)  # Allow H2 to initialize
+        
+    def test_basic_commands(self):
+        """Test basic AT command functionality"""
+        # Test AT ping
+        self._send_command("AT")
+        response = self._read_response()
+        self.assertIn("OK", response)
+        
+    def test_ble_initialization(self):
+        """Test BLE stack initialization"""
+        # Initialize BLE server mode
+        self._send_command("AT+BLEINIT=2")
+        response = self._read_response(timeout=10)
+        self.assertIn("OK", response)
+        
+        # Set device name
+        self._send_command('AT+BLENAME="Watts-Test"')
+        response = self._read_response()
+        self.assertIn("OK", response)
+        
+    def test_led_commands(self):
+        """Test LED controller commands"""
+        # Prepare LED frame
+        self._send_command("AT+LED_PREP=100,200")
+        response = self._read_response()
+        self.assertIn("OK", response)
+        
+        # Check statistics
+        self._send_command("AT+LED_STATS")
+        response = self._read_response()
+        self.assertIn("+LED_STATS:SPI", response)
+        
+    def test_error_handling(self):
+        """Test error conditions"""
+        # Invalid command
+        self._send_command("AT+INVALID")
+        response = self._read_response()
+        self.assertIn("ERROR", response)
+        
+        # Invalid parameter
+        self._send_command("AT+LED_PREP=10000,20000")  # Too many pixels
+        response = self._read_response()
+        self.assertIn("ERROR", response)
+        
+    def _send_command(self, command):
+        """Send AT command"""
+        self.serial.write(f"{command}\r\n".encode())
+        
+    def _read_response(self, timeout=5):
+        """Read AT response"""
+        start_time = time.time()
+        response = ""
+        
+        while time.time() - start_time < timeout:
+            if self.serial.in_waiting:
+                data = self.serial.read(self.serial.in_waiting).decode('utf-8', errors='ignore')
+                response += data
+                
+                if 'OK\r\n' in response or 'ERROR\r\n' in response:
+                    break
+                    
+            time.sleep(0.01)
+            
+        return response
+
+if __name__ == "__main__":
+    unittest.main()
+```
+
+### Performance Benchmarking
+
+**File**: `tests/performance_test.py`
+```python
+#!/usr/bin/env python3
+"""
+Performance benchmarking for dual-MCU system
+"""
+
+import time
+import statistics
+import serial
+
+class PerformanceTests:
+    def __init__(self, h2_port):
+        self.h2_serial = serial.Serial(h2_port, 5000000, timeout=1)
+        
+    def test_at_command_latency(self, iterations=100):
+        """Measure AT command response latency"""
+        latencies = []
+        
+        for i in range(iterations):
+            start_time = time.time()
+            self.h2_serial.write(b"AT\r\n")
+            
+            # Wait for OK response
+            response = ""
+            while True:
+                data = self.h2_serial.read(10).decode('utf-8', errors='ignore')
+                response += data
+                if 'OK' in response:
+                    break
+                    
+            end_time = time.time()
+            latency_ms = (end_time - start_time) * 1000
+            latencies.append(latency_ms)
+            
+            if i % 10 == 0:
+                print(f"Progress: {i}/{iterations}")
+                
+        # Calculate statistics
+        avg_latency = statistics.mean(latencies)
+        min_latency = min(latencies)
+        max_latency = max(latencies)
+        p95_latency = sorted(latencies)[int(0.95 * len(latencies))]
+        
+        print(f"AT Command Latency Results ({iterations} samples):")
+        print(f"  Average: {avg_latency:.2f}ms")
+        print(f"  Minimum: {min_latency:.2f}ms")
+        print(f"  Maximum: {max_latency:.2f}ms")
+        print(f"  95th %ile: {p95_latency:.2f}ms")
+        
+        return {
+            'avg': avg_latency,
+            'min': min_latency, 
+            'max': max_latency,
+            'p95': p95_latency
+        }
+        
+    def test_led_frame_throughput(self, frame_count=50):
+        """Test LED frame processing throughput"""
+        pixel_counts = [(100, 100), (500, 500), (1000, 1000)]
+        
+        for ch2_pixels, ch3_pixels in pixel_counts:
+            print(f"Testing {ch2_pixels}+{ch3_pixels} pixels...")
+            
+            # Prepare LED controller
+            cmd = f"AT+LED_PREP={ch2_pixels},{ch3_pixels}\r\n"
+            self.h2_serial.write(cmd.encode())
+            self._read_response()
+            
+            # Measure frame processing time
+            start_time = time.time()
+            
+            for i in range(frame_count):
+                # Simulate frame reception completion
+                # (In real test, this would be triggered by SPI frame)
+                time.sleep(0.001)  # 1ms per frame simulation
+                
+            end_time = time.time()
+            
+            total_time = end_time - start_time
+            frames_per_second = frame_count / total_time
+            pixels_per_second = (ch2_pixels + ch3_pixels) * frames_per_second
+            
+            print(f"  {frames_per_second:.1f} FPS")
+            print(f"  {pixels_per_second/1000:.1f}K pixels/sec")
+            
+    def _read_response(self):
+        """Read AT response"""
+        response = ""
+        while True:
+            data = self.h2_serial.read(50).decode('utf-8', errors='ignore')
+            response += data
+            if 'OK' in response or 'ERROR' in response:
+                break
+        return response
+
+if __name__ == "__main__":
+    import sys
+    
+    if len(sys.argv) != 2:
+        print("Usage: python performance_test.py <h2_port>")
+        sys.exit(1)
+        
+    h2_port = sys.argv[1]
+    tester = PerformanceTests(h2_port)
+    
+    print("🚀 Starting performance tests...")
+    tester.test_at_command_latency()
+    print()
+    tester.test_led_frame_throughput()
+    print("✅ Performance tests complete")
+```
+
+## Continuous Integration
+
+### GitHub Actions Workflow
+
+**File**: `.github/workflows/build.yml`
+```yaml
+name: Build Watts v3 Firmware
+
+on:
+  push:
+    branches: [ main, develop ]
+  pull_request:
+    branches: [ main ]
+
+jobs:
+  build-esp32c5:
+    runs-on: ubuntu-latest
+    steps:
+    - uses: actions/checkout@v3
+      with:
+        submodules: recursive
+        
+    - name: Setup ESP-IDF
+      uses: espressif/esp-idf-ci-action@v1
+      with:
+        esp_idf_version: v5.1.2
+        
+    - name: Build ESP32-C5 firmware
+      working-directory: esp32-c5-main
+      run: |
+        idf.py set-target esp32c5
+        idf.py build
+        
+    - name: Upload C5 artifacts
+      uses: actions/upload-artifact@v3
+      with:
+        name: esp32-c5-firmware
+        path: esp32-c5-main/build/*.bin
+        
+  build-esp32h2:
+    runs-on: ubuntu-latest
+    steps:
+    - uses: actions/checkout@v3
+      with:
+        submodules: recursive
+        
+    - name: Setup ESP-IDF
+      uses: espressif/esp-idf-ci-action@v1
+      with:
+        esp_idf_version: v5.1.2
+        
+    - name: Build ESP32-H2 firmware
+      working-directory: esp32-h2-at
+      run: |
+        idf.py set-target esp32h2
+        idf.py build
+        
+    - name: Upload H2 artifacts
+      uses: actions/upload-artifact@v3
+      with:
+        name: esp32-h2-firmware
+        path: esp32-h2-at/build/*.bin
+        
+  test:
+    runs-on: ubuntu-latest
+    needs: [build-esp32c5, build-esp32h2]
+    steps:
+    - uses: actions/checkout@v3
+    
+    - name: Setup Python
+      uses: actions/setup-python@v4
+      with:
+        python-version: '3.9'
+        
+    - name: Install dependencies
+      run: |
+        pip install pyserial
+        
+    - name: Run unit tests
+      run: |
+        python -m pytest tests/ -v
+```
+
+This comprehensive development workflow provides the foundation for efficient dual-MCU development, from initial setup through deployment and maintenance. The automated testing and CI/CD pipeline ensures code quality and system reliability throughout the development lifecycle.

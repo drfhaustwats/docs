@@ -1,0 +1,484 @@
+---
+title: "Troubleshooting Guide"
+description: "Diagnostic guide with specific code locations and debugging procedures for common Watts v3 dual-MCU issues"
+---
+
+# Troubleshooting Guide
+
+This guide provides specific code locations, debugging procedures, and diagnostic steps for common issues in the Watts v3 dual-MCU system. Each section points directly to relevant source files and functions.
+
+## AT Communication Issues
+
+### UART Connection Problems
+
+**Symptoms:**
+- No response to AT commands
+- Garbled responses
+- Command timeouts
+
+**Check These Code Locations:**
+
+1. **ESP32-C5 ATHost Configuration** (`esp32-c5-main/ATHost.cpp`):
+   ```cpp
+   // Line ~45: UART initialization
+   void ATHost_init() {
+       uart_config_t uart_config = {
+           .baud_rate = 5000000,           // Verify baud rate match
+           .flow_ctrl = UART_HW_FLOWCTRL_CTS_RTS,  // Check flow control
+       };
+   }
+   ```
+
+2. **ESP32-H2 CAT Parser Setup** (`esp32-h2-at/main/EspAt_firmware.c`):
+   ```cpp
+   // Line ~82: UART configuration must match C5
+   uart_config_t uart_config = {
+       .baud_rate = 5000000,               // Must match ATHost
+       .flow_ctrl = UART_HW_FLOWCTRL_CTS_RTS,
+       .rx_flow_ctrl_thresh = 122,         // Check threshold
+   };
+   ```
+
+**Debugging Steps:**
+```bash
+# Check H2 UART pins in hardware.mdx
+GPIO 4  -> UART TX (to C5 RX)
+GPIO 5  -> UART RX (from C5 TX) 
+GPIO 6  -> UART RTS
+GPIO 7  -> UART CTS
+
+# Test basic connectivity
+echo "AT" > /dev/ttyUSB1  # Should return "OK"
+```
+
+### AT Command Parser Errors
+
+**Symptoms:**
+- Commands return ERROR unexpectedly
+- Parser stuck in wrong state
+- Invalid parameter parsing
+
+**Check These Code Locations:**
+
+1. **Tiny-CAT State Machine** (`esp32-h2-at/main/cat.c`):
+   ```cpp
+   // Line ~280: State machine processing
+   static cat_return_state cat_handle_char(struct cat_descriptor *desc, char ch) {
+       switch (desc->state) {
+           case CAT_STATE_IDLE:           // Check state transitions
+           case CAT_STATE_PARSE_COMMAND_CHAR:
+           case CAT_STATE_WRITE_LOOP:     // Parameter parsing issues here
+       }
+   }
+   ```
+
+2. **Command Registration** (`esp32-h2-at/main/EspAt_firmware.c`):
+   ```cpp
+   // Line ~512: Verify command table
+   void register_all_commands() {
+       static struct cat_command at_cmds[35];  // Check array size
+       // Ensure all commands properly registered
+   }
+   ```
+
+**Diagnostic Commands:**
+```cpp
+// Add debug logging in cat.c
+ESP_LOGI(TAG, "CAT State: %d, Char: 0x%02X", desc->state, ch);
+
+// Check command parsing
+ESP_LOGI(TAG, "Command: %s, Args: %d", cmd->name, args_num);
+```
+
+### ATHost Response Handling
+
+**Symptoms:**
+- sendATWaitOK() timeouts
+- Response parsing failures
+- URC handling issues
+
+**Check These Code Locations:**
+
+1. **Response Parser** (`esp32-c5-main/ATHost.cpp`):
+   ```cpp
+   // Line ~150: Response reading logic
+   bool ATHost_sendATWaitOK(const char* command, int timeout) {
+       // Check timeout values and response parsing
+       while (millis() - start < timeout) {
+           // Response buffer handling here
+       }
+   }
+   ```
+
+2. **URC Processing** (`esp32-c5-main/ATHost.cpp`):
+   ```cpp
+   // Line ~200: Unsolicited Result Code handling
+   void processURC(const char* line) {
+       if (strncmp(line, "+LED_DONE", 9) == 0) {
+           // LED completion handling
+       } else if (strncmp(line, "+BLEGATTSRECV:", 14) == 0) {
+           // BLE data reception
+       }
+   }
+   ```
+
+**Debug Response Issues:**
+```cpp
+// Enable ATHost debug logging
+#define ATHOST_DEBUG 1
+Serial.printf("AT CMD: %s\n", command);
+Serial.printf("Response: %s\n", response_buffer);
+```
+
+## Frame Synchronization Issues
+
+### ParlIO Output Problems
+
+**Symptoms:**
+- No LED output from C5 channels
+- Incorrect frame timing
+- Data corruption in transmission
+
+**Check These Code Locations:**
+
+1. **Shared Manager Bus Wrapper** (`esp32-c5-main/NeoPixelBusH2.cpp`):
+   ```cpp
+   // Line ~45: ParlIO configuration in shared manager
+   class NeoPixelBusSharedManager {
+       rmt_channel_handle_t _rmt_channels[2];     // RMT channels 0,1
+       parlio_tx_unit_handle_t _parlio_unit;      // ParlIO unit for H2
+       
+       // Line ~120: Check ParlIO initialization
+       void initializeParlIO() {
+           parlio_tx_unit_config_t config = {
+               .clk_src = PARLIO_CLK_SRC_DEFAULT,
+               .data_width = 8,
+               .clk_out_gpio_num = GPIO_NUM_10,   // 80MHz clock to H2
+               .valid_gpio_num = GPIO_NUM_25,     // Frame valid signal
+           };
+       }
+   }
+   ```
+
+2. **Frame Data Assembly** (`esp32-c5-main/NeoPixelBusH2.cpp`):
+   ```cpp
+   // Line ~200: Frame assembly for H2 channels
+   void assembleH2Frame(uint8_t* buffer, uint16_t ch2_pixels, uint16_t ch3_pixels) {
+       led_frame_header_t* header = (led_frame_header_t*)buffer;
+       header->magic = 0x4C45;               // Check magic number
+       header->ch2_pixels = ch2_pixels;      // Verify pixel counts
+       header->ch3_pixels = ch3_pixels;
+       // CRC calculation here - check implementation
+   }
+   ```
+
+**Debug ParlIO Issues:**
+```cpp
+// Check GPIO assignments in shared manager
+ESP_LOGI(TAG, "ParlIO CLK: GPIO %d, Valid: GPIO %d", 
+         GPIO_NUM_10, GPIO_NUM_25);
+
+// Verify frame assembly
+ESP_LOG_BUFFER_HEX(TAG, frame_buffer, header_size + payload_size);
+```
+
+### SPI Slave Reception Issues
+
+**Symptoms:**
+- H2 not receiving frames
+- CRC validation failures
+- Frame size mismatches
+
+**Check These Code Locations:**
+
+1. **SPI Slave Configuration** (`esp32-h2-at/main/spi_led_controller.c`):
+   ```cpp
+   // Line ~342: SPI slave setup
+   spi_bus_config_t buscfg = {
+       .mosi_io_num = PIN_SPI_MOSI,          // GPIO 11 from C5 GPIO 26
+       .sclk_io_num = PIN_SPI_SCLK,          // GPIO 10 from C5 GPIO 10  
+       .max_transfer_sz = LED_MAX_FRAME_SIZE, // 8008 bytes max
+   };
+   
+   spi_slave_interface_config_t slvcfg = {
+       .spics_io_num = PIN_SPI_CS,           // GPIO 25 from C5 GPIO 25
+       .queue_size = QUEUE_SIZE,             // 8 transactions
+   };
+   ```
+
+2. **Frame Reception Task** (`esp32-h2-at/main/spi_led_controller.c`):
+   ```cpp
+   // Line ~122: SPI reception task
+   void spi_recv_task(void *arg) {
+       spi_slave_transaction_t *rtrans;
+       if (spi_slave_get_trans_result(SPI_HOST, &rtrans, portMAX_DELAY) == ESP_OK) {
+           // Check transaction completion
+           uint8_t *frame_buf = (uint8_t*)rtrans->rx_buffer;
+           xQueueSend(controller->frame_queue, &frame_buf, 0);
+       }
+   }
+   ```
+
+3. **Frame Validation** (`esp32-h2-at/main/spi_led_controller.c`):
+   ```cpp
+   // Line ~400: CRC and header validation
+   bool validate_frame(uint8_t *frame_data, size_t frame_size) {
+       led_frame_header_t *header = (led_frame_header_t *)frame_data;
+       
+       if (header->magic != 0x4C45) {           // Check magic
+           ESP_LOGW(TAG, "Invalid frame magic: 0x%04X", header->magic);
+           return false;
+       }
+       
+       // CRC validation here
+       uint16_t computed_crc = crc16_ccitt_lut(payload, payload_size);
+   }
+   ```
+
+**Debug SPI Reception:**
+```cpp
+// Add transaction logging
+ESP_LOGI(TAG, "SPI trans complete: %d bytes", rtrans->trans_len / 8);
+
+// Check frame validation
+ESP_LOGI(TAG, "Frame: magic=0x%04X, ch2=%d, ch3=%d, crc=0x%04X",
+         header->magic, header->ch2_pixels, header->ch3_pixels, header->crc16);
+```
+
+### Timing Synchronization Problems
+
+**Symptoms:**
+- Frames arrive at wrong timing
+- LED glitches or corruption
+- Performance degradation
+
+**Check These Code Locations:**
+
+1. **AT LED_PREP Command** (`esp32-h2-at/main/at_led_commands.c`):
+   ```cpp
+   // Line ~560: Frame preparation timing
+   static cat_return_state at_cmd_led_prep_spi(const struct cat_command *cmd,
+                                                const uint8_t *data, size_t size, size_t args_num) {
+       // Validate pixel counts before SPI slave preparation
+       if (ch2_pixels > MAX_PIXELS_PER_CHANNEL || ch3_pixels > MAX_PIXELS_PER_CHANNEL) {
+           return CAT_RETURN_STATE_ERROR;
+       }
+       
+       // Start LED controller - timing critical
+       led_controller_err_t err = led_controller_start_receive(g_spi_led_controller, ch2_pixels, ch3_pixels);
+   }
+   ```
+
+2. **NeoPixelBus Integration** (`esp32-c5-main/NeoPixelBusH2.cpp`):
+   ```cpp
+   // Line ~180: Synchronization with ATHost
+   void show() {
+       // Send AT+LED_PREP before frame transmission
+       if (!ATHost_sendLedPrep(_channel2PixelCount, _channel3PixelCount, 100)) {
+           Serial.println("LED_PREP failed");
+           return;
+       }
+       
+       // Transmit frame via shared manager
+       _sharedManager->transmitFrame(_frameBuffer, _frameSize);
+   }
+   ```
+
+## BLE Connectivity Issues
+
+### NimBLE Stack Problems
+
+**Symptoms:**
+- BLE initialization failures
+- Service registration errors
+- Connection drops
+
+**Check These Code Locations:**
+
+1. **BLE Initialization** (`esp32-h2-at/main/ble_at_handler.c`):
+   ```cpp
+   // Line ~161: BLE stack initialization
+   cat_return_state at_cmd_bleinit(const struct cat_command *cmd, const uint8_t *data, size_t size, size_t args_num) {
+       if (mode != 2) return CAT_RETURN_STATE_ERROR;  // Only server mode
+       
+       gatt_svc_init();    // Check GATT service initialization
+       gap_init();         // Check GAP initialization
+       
+       nimble_port_freertos_init(ble_host_task);  // Host task startup
+       
+       // Wait for sync with timeout
+       int timeout = 50;
+       while (!ble_hs_synced() && timeout > 0) {
+           vTaskDelay(pdMS_TO_TICKS(100));
+           timeout--;
+       }
+   }
+   ```
+
+2. **Service Management** (`esp32-h2-at/main/gatt_svc.c`):
+   ```cpp
+   // Line ~49: Dynamic service registration
+   int gatt_svc_dynamic_add_service(uint16_t uuid, const char *name) {
+       // Check service table availability
+       for (int i = 0; i < MAX_SERVICES; i++) {
+           if (!service_table[i].in_use) {
+               service_table[i].uuid = uuid;
+               service_table[i].in_use = true;
+               // Service definition creation here
+           }
+       }
+   }
+   ```
+
+**Debug BLE Issues:**
+```cpp
+// Enable NimBLE logging in sdkconfig
+CONFIG_BT_NIMBLE_LOG_LEVEL_DEBUG=y
+
+// Check service table status
+ESP_LOGI(TAG, "Service %d: UUID=0x%04X, in_use=%d", 
+         i, service_table[i].uuid, service_table[i].in_use);
+```
+
+### GATT Service Issues
+
+**Symptoms:**
+- Services not visible to clients
+- Characteristic read/write failures
+- Notification problems
+
+**Check These Code Locations:**
+
+1. **Dynamic Service Creation** (`esp32-h2-at/main/ble_at.c`):
+   ```cpp
+   // Line ~226: Lighting service example
+   void create_lighting_service() {
+       at_ble_addsvc(0x1234, "Lighting Control");           // Service creation
+       at_ble_addchar(0, 0x1235, BLE_GATT_CHR_PROP_READ | BLE_GATT_CHR_PROP_WRITE, "Power");
+       at_ble_addchar(0, 0x1236, BLE_GATT_CHR_PROP_WRITE, "Brightness");
+   }
+   ```
+
+2. **GATT Access Handler** (`esp32-h2-at/main/gatt_svc.c`):
+   ```cpp
+   // Line ~262: Characteristic access handling
+   int dynamic_gatt_access_cb(uint16_t conn, uint16_t attr, struct ble_gatt_access_ctxt *ctxt, void *arg) {
+       uint8_t svc_idx = (uintptr_t)arg >> 8;
+       uint8_t chr_idx = (uintptr_t)arg & 0xFF;
+       
+       switch (ctxt->op) {
+           case BLE_GATT_ACCESS_OP_READ_CHR:    // Read handling
+           case BLE_GATT_ACCESS_OP_WRITE_CHR:   // Write handling
+       }
+   }
+   ```
+
+**Debug GATT Issues:**
+```cpp
+// Log service registration
+ESP_LOGI(TAG, "Registering service: UUID=0x%04X", uuid);
+
+// Log characteristic access
+ESP_LOGI(TAG, "GATT access: svc=%d, chr=%d, op=%d", svc_idx, chr_idx, ctxt->op);
+```
+
+## Hardware Configuration Issues
+
+### GPIO Pin Conflicts
+
+**Symptoms:**
+- Signals not reaching expected pins
+- Multiple functions on same GPIO
+- Incorrect voltage levels
+
+**Check These Pin Assignments:**
+
+1. **ESP32-C5 Pin Configuration** (see `hardware.mdx`):
+   ```
+   GPIO 4,5,6,7   -> UART to H2
+   GPIO 10,26,25  -> ParlIO to H2 SPI
+   GPIO 27,28     -> RMT LED outputs (channels 0,1)
+   ```
+
+2. **ESP32-H2 Pin Configuration** (see `hardware.mdx`):
+   ```
+   GPIO 4,5,6,7   -> UART from C5
+   GPIO 10,11,25  -> SPI slave from C5 ParlIO
+   GPIO 27,26     -> RMT LED outputs (channels 2,3)
+   ```
+
+**Verify Pin Configuration:**
+```cpp
+// In both MCU initialization
+gpio_config_t io_conf = {
+    .pin_bit_mask = (1ULL << gpio_num),
+    .mode = GPIO_MODE_OUTPUT,           // Check mode
+    .pull_up_en = GPIO_PULLUP_DISABLE,  // Check pull settings
+    .pull_down_en = GPIO_PULLDOWN_DISABLE,
+    .intr_type = GPIO_INTR_DISABLE
+};
+```
+
+### Power Supply Issues
+
+**Check These Code Locations:**
+
+1. **Power Management** (`esp32-c5-main/main.cpp`):
+   ```cpp
+   // CPU frequency settings
+   setCpuFrequencyMhz(240);  // Verify power requirements
+   ```
+
+2. **Current Monitoring** (add to main loop):
+   ```cpp
+   // Monitor system health
+   ESP_LOGI(TAG, "Free heap: %d, Min free: %d", 
+            esp_get_free_heap_size(), esp_get_minimum_free_heap_size());
+   ```
+
+## Error Recovery Procedures
+
+### Automatic Reset Strategies
+
+**Check These Code Locations:**
+
+1. **Watchdog Configuration** (`esp32-h2-at/main/EspAt_firmware.c`):
+   ```cpp
+   // Line ~104: Watchdog setup
+   esp_task_wdt_init(30, true);              // 30 second timeout
+   esp_task_wdt_add(xTaskGetCurrentTaskHandle());
+   ```
+
+2. **Error State Detection** (`esp32-c5-main/ATHost.cpp`):
+   ```cpp
+   // Add communication failure detection
+   if (consecutive_failures > 5) {
+       Serial.println("H2 communication failed - attempting reset");
+       // Trigger H2 reset via GPIO
+   }
+   ```
+
+### Diagnostic Commands
+
+**Built-in Debug Commands:**
+
+```bash
+# Check H2 system status
+AT+LED_STATS          # LED controller status
+AT+BLESVC              # BLE service list  
+AT+XGET                # System variables
+
+# Enable debug logging levels
+AT+XSET=log_level,4    # Set to debug level
+```
+
+**Memory Diagnostics:**
+```cpp
+// Add to periodic monitoring
+ESP_LOGI(TAG, "Task HWM: CAT=%d, SPI=%d, BLE=%d",
+         uxTaskGetStackHighWaterMark(cat_task_handle),
+         uxTaskGetStackHighWaterMark(spi_task_handle),
+         uxTaskGetStackHighWaterMark(ble_task_handle));
+```
+
+This troubleshooting guide provides specific file locations and debugging procedures for the most common issues in the dual-MCU system, helping developers quickly identify and resolve problems.

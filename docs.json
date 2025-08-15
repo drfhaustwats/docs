@@ -23,6 +23,8 @@
               "esp32-c5-implementation",
               "esp32-h2-implementation",
               "frame-data-protocol",
+              "development-workflow",
+              "troubleshooting",
               "quickstart",
               "development"
             ]
