@@ -1,0 +1,769 @@
+---
+title: "ESP32-H2 Implementation Guide"
+description: "Complete guide to the ESP32-H2 secondary controller with AT firmware, BLE services, and LED controller implementation"
+---
+
+# ESP32-H2 Implementation Guide
+
+The ESP32-H2 serves as the secondary controller in the Watts v3 dual-MCU system, providing BLE connectivity and distributed LED control while communicating with the ESP32-C5 via AT commands over UART.
+
+## Architecture Overview
+
+The ESP32-H2 firmware implements a multi-subsystem architecture:
+
+```
+┌─────────────────────────────────────────────────────────────┐
+│                     ESP32-H2 Secondary                      │
+├─────────────────────────────────────────────────────────────┤
+│  ┌─────────────────┐  ┌─────────────────┐                  │
+│  │   Tiny-CAT      │  │   NimBLE Stack  │                  │
+│  │   AT Parser     │  │   BLE Services  │                  │
+│  │   (UART 5Mbps)  │  │   GAP/GATT      │                  │
+│  └─────────┬───────┘  └─────────┬───────┘                  │
+│            │                    │                          │
+│  ┌─────────▼────────────────────▼───────┐                  │
+│  │         Main Application             │                  │
+│  │    • Command Dispatch                │                  │
+│  │    • Resource Management             │                  │
+│  │    • Error Handling                  │                  │
+│  └─────────┬────────────────────────────┘                  │
+│            │                                               │
+│  ┌─────────▼─────────────────┐  ┌─────────────────────────┐ │
+│  │   SPI Slave LED Controller │  │  RMT LED Output        │ │
+│  │   • Frame Reception        │  │  • Channels 2-3        │ │
+│  │   • CRC Validation         │  │  • WS2812 Protocol     │ │
+│  │   • 80MHz Data Stream      │  │  • Synchronized Output │ │
+│  └─────────────────────────────┘  └─────────────────────────┘ │
+└─────────────────────────────────────────────────────────────┘
+```
+
+## AT Firmware Architecture
+
+### Tiny-CAT Framework
+
+The ESP32-H2 firmware is built around the Tiny-CAT AT command parser, providing a robust and extensible command interface:
+
+```cpp
+// File: main/cat.h - Core framework structure
+struct cat_command {
+    const char *name;                    // Command name (e.g., "+BLEINIT")
+    cat_cmd_write_handler write;         // AT+CMD=value handler
+    cat_cmd_read_handler read;           // AT+CMD? handler  
+    cat_cmd_run_handler run;             // AT+CMD handler
+    cat_cmd_test_handler test;           // AT+CMD=? handler
+    struct cat_variable const *var;     // Associated variables
+    size_t var_num;                     // Variable count
+    bool need_all_vars;                 // Validation requirement
+};
+```
+
+**Parser State Machine:**
+The Tiny-CAT parser implements a finite state machine with 15+ states for robust command processing:
+- `CAT_STATE_IDLE` - Waiting for AT commands
+- `CAT_STATE_PARSE_COMMAND_CHAR` - Command parsing
+- `CAT_STATE_WRITE_LOOP` - Parameter processing
+- `CAT_STATE_HOLD` - Suspended state (for OTA operations)
+
+### Main Application Structure
+
+**File**: `main/EspAt_firmware.c`
+
+**Initialization Sequence:**
+```cpp
+void app_main(void) {
+    // 1. Initialize NVS flash
+    esp_err_t ret = nvs_flash_init();
+    if (ret == ESP_ERR_NVS_NO_FREE_PAGES || ret == ESP_ERR_NVS_NEW_VERSION_FOUND) {
+        ESP_ERROR_CHECK(nvs_flash_erase());
+        ret = nvs_flash_init();
+    }
+    
+    // 2. Configure UART for AT communication
+    uart_config_t uart_config = {
+        .baud_rate = 5000000,                    // 5 Mbaud
+        .data_bits = UART_DATA_8_BITS,
+        .parity = UART_PARITY_DISABLE,
+        .stop_bits = UART_STOP_BITS_1,
+        .flow_ctrl = UART_HW_FLOWCTRL_CTS_RTS,   // Hardware flow control
+        .rx_flow_ctrl_thresh = 122,
+    };
+    
+    // 3. Register all AT commands
+    register_all_commands();
+    
+    // 4. Initialize SPI LED controller
+    spi_led_controller_init();
+    
+    // 5. Initialize BLE stack
+    nimble_port_init();
+    
+    // 6. Start AT command processing task
+    xTaskCreate(cat_task, "cat_task", 8*1024, NULL, 6, NULL);
+    
+    // 7. Validate OTA boot state
+    verify_running_partition();
+}
+```
+
+### FreeRTOS Task Structure
+
+**Primary Tasks:**
+
+1. **cat_task** (Priority 6, 8KB stack):
+   ```cpp
+   void cat_task(void *arg) {
+       while (1) {
+           cat_service();           // Process AT commands
+           vTaskDelay(pdMS_TO_TICKS(1));  // 1ms polling
+       }
+   }
+   ```
+
+2. **spi_recv_task** (Priority 12, 4KB stack):
+   ```cpp
+   void spi_recv_task(void *arg) {
+       for (;;) {
+           spi_slave_transaction_t *rtrans;
+           if (spi_slave_get_trans_result(SPI_HOST, &rtrans, portMAX_DELAY) == ESP_OK) {
+               uint8_t *frame_buf = (uint8_t*)rtrans->rx_buffer;
+               xQueueSend(controller->frame_queue, &frame_buf, 0);
+           }
+       }
+   }
+   ```
+
+3. **led_update_task** (Priority 12, 4KB stack):
+   ```cpp
+   void led_update_task(void *arg) {
+       uint8_t *frame_buffer;
+       while (xQueueReceive(controller->frame_queue, &frame_buffer, portMAX_DELAY)) {
+           process_led_frame(frame_buffer);
+           // Re-queue buffer for next reception
+           spi_slave_queue_trans(SPI_HOST, &trans_desc, portMAX_DELAY);
+       }
+   }
+   ```
+
+4. **ble_host_task** (NimBLE managed):
+   - Runs `nimble_port_run()`
+   - Handles BLE stack operations
+   - Managed by NimBLE FreeRTOS integration
+
+## BLE Service Implementation
+
+### NimBLE Integration
+
+**Initialization Flow:**
+```cpp
+// File: main/ble_at_handler.c
+static bool ble_initialized = false;
+
+cat_return_state at_cmd_bleinit(const struct cat_command *cmd,
+                                 const uint8_t *data, size_t size, size_t args_num) {
+    if (ble_initialized) return CAT_RETURN_STATE_OK;
+    
+    int mode = atoi((const char *)data);
+    if (mode != 2) return CAT_RETURN_STATE_ERROR;  // Only server mode
+    
+    // Initialize GATT services
+    gatt_svc_init();
+    gap_init();
+    
+    // Start BLE host task
+    nimble_port_freertos_init(ble_host_task);
+    
+    // Wait for synchronization with 5-second timeout
+    int timeout = 50;
+    while (!ble_hs_synced() && timeout > 0) {
+        vTaskDelay(pdMS_TO_TICKS(100));
+        timeout--;
+    }
+    
+    if (!ble_hs_synced()) {
+        ESP_LOGE(TAG, "BLE host sync timeout");
+        return CAT_RETURN_STATE_ERROR;
+    }
+    
+    ble_initialized = true;
+    return CAT_RETURN_STATE_OK;
+}
+```
+
+### Dynamic GATT Service Management
+
+**Service Table Structure:**
+```cpp
+// File: main/gatt_svc.c
+typedef struct {
+    struct ble_gatt_svc_def *svc_def;   // NimBLE service definition
+    struct ble_gatt_chr_def *chr_defs;  // Characteristic definitions
+    ble_uuid16_t *uuid_ptr;             // Service UUID object
+    uint16_t uuid;                      // 16-bit UUID value
+    char name[20];                      // Human-readable name
+    bool in_use;                        // Allocation flag
+} dynamic_service_entry_t;
+
+typedef struct {
+    ble_uuid16_t *uuid_ptr;             // Characteristic UUID
+    uint16_t uuid;                      // 16-bit UUID value
+    uint8_t properties;                 // BLE properties (R/W/N/I)
+    char name[20];                      // Name
+    bool in_use;                        // Allocation flag
+    uint8_t value[128];                 // Data storage
+    uint16_t val_len;                   // Current data length
+    bool notify_enabled;                // Notification state
+    uint16_t conn_handle;               // Connection handle
+    uint16_t val_handle;                // Attribute handle
+} dynamic_char_entry_t;
+
+// Global tables: 10 services × 10 characteristics = 100 total
+static dynamic_service_entry_t service_table[MAX_SERVICES];
+static dynamic_char_entry_t char_table[MAX_SERVICES][MAX_CHARACTERISTICS];
+```
+
+**Service Creation Example:**
+```cpp
+// File: main/ble_at.c - Lighting service definition
+#define LIGHTING_SERVICE_UUID        0x1234
+#define LIGHTING_POWER_CHAR_UUID     0x1235
+#define LIGHTING_BRIGHTNESS_CHAR_UUID 0x1236
+#define LIGHTING_PRESET_CHAR_UUID    0x1237
+#define LIGHTING_COLOR_CHAR_UUID     0x1238
+
+// Create lighting control service
+void create_lighting_service() {
+    // Add service
+    at_ble_addsvc(0x1234, "Lighting Control");
+    
+    // Add characteristics
+    at_ble_addchar(0, 0x1235, BLE_GATT_CHR_PROP_READ | BLE_GATT_CHR_PROP_WRITE, "Power");
+    at_ble_addchar(0, 0x1236, BLE_GATT_CHR_PROP_WRITE, "Brightness");
+    at_ble_addchar(0, 0x1237, BLE_GATT_CHR_PROP_WRITE, "Preset");
+    at_ble_addchar(0, 0x1238, BLE_GATT_CHR_PROP_WRITE, "Color");
+}
+```
+
+### BLE AT Commands
+
+**Core BLE Command Set:**
+
+1. **AT+BLEINIT=2** - Initialize BLE server mode
+2. **AT+BLENAME="name"** - Set device name
+3. **AT+BLEADVSTART** - Start advertising
+4. **AT+BLEADVSTOP** - Stop advertising
+5. **AT+BLEADDSVC=uuid,name** - Add dynamic service
+6. **AT+BLEADDCHAR=svc,uuid,props,name** - Add characteristic
+7. **AT+BLEWRITE=svc,char,"hexdata"** - Write characteristic value
+8. **AT+BLEREAD=svc,char** - Read characteristic value
+9. **AT+BLESVC** - List all services
+10. **AT+BLECHAR=svc** - List service characteristics
+
+**GATT Access Handler:**
+```cpp
+int dynamic_gatt_access_cb(uint16_t conn, uint16_t attr, 
+                          struct ble_gatt_access_ctxt *ctxt, void *arg) {
+    uint8_t svc_idx = (uintptr_t)arg >> 8;
+    uint8_t chr_idx = (uintptr_t)arg & 0xFF;
+    
+    switch (ctxt->op) {
+        case BLE_GATT_ACCESS_OP_READ_CHR:
+            os_mbuf_append(ctxt->om, char_table[svc_idx][chr_idx].value, 
+                          char_table[svc_idx][chr_idx].val_len);
+            
+            // Send URC notification to C5
+            printf("+BLEGATTSREAD:%d,%d,\"%s\"\r\n", svc_idx, chr_idx, 
+                   hex_string(char_table[svc_idx][chr_idx].value, 
+                             char_table[svc_idx][chr_idx].val_len));
+            break;
+            
+        case BLE_GATT_ACCESS_OP_WRITE_CHR:
+            uint16_t len = OS_MBUF_PKTLEN(ctxt->om);
+            if (len > sizeof(char_table[svc_idx][chr_idx].value)) {
+                return BLE_ATT_ERR_INVALID_ATTR_VALUE_LEN;
+            }
+            
+            os_mbuf_copydata(ctxt->om, 0, len, char_table[svc_idx][chr_idx].value);
+            char_table[svc_idx][chr_idx].val_len = len;
+            
+            // Send URC notification to C5
+            printf("+BLEGATTSRECV:\"%s\"\r\n", 
+                   hex_string(char_table[svc_idx][chr_idx].value, len));
+            break;
+    }
+    
+    return 0;
+}
+```
+
+### GAP Management
+
+**Advertising Configuration:**
+```cpp
+// File: main/gap.c
+void start_advertising() {
+    struct ble_hs_adv_fields fields;
+    memset(&fields, 0, sizeof(fields));
+    
+    // Device name
+    fields.name = ble_svc_gap_device_name();
+    fields.name_len = strlen(fields.name);
+    fields.name_is_complete = 1;
+    
+    // Service UUIDs from active services
+    uint16_t service_uuids[MAX_SERVICES];
+    int num_services = get_active_service_uuids(service_uuids);
+    if (num_services > 0) {
+        fields.uuids16 = service_uuids;
+        fields.num_uuids16 = num_services;
+        fields.uuids16_is_complete = 1;
+    }
+    
+    // Set advertising data
+    ble_gap_adv_set_fields(&fields);
+    
+    // Start advertising
+    struct ble_gap_adv_params adv_params = {0};
+    adv_params.conn_mode = BLE_GAP_CONN_MODE_UND;
+    adv_params.disc_mode = BLE_GAP_DISC_MODE_GEN;
+    
+    ble_gap_adv_start(BLE_OWN_ADDR_PUBLIC, NULL, BLE_HS_FOREVER,
+                      &adv_params, gap_event_handler, NULL);
+}
+```
+
+## LED Controller (SPI Slave)
+
+### SPI Slave Configuration
+
+**Hardware Setup:**
+```cpp
+// File: main/spi_led_controller.c
+#define SPI_HOST         SPI2_HOST        // SPI2 peripheral
+#define PIN_SPI_SCLK     GPIO_NUM_10      // Clock from C5 GPIO 10
+#define PIN_SPI_MOSI     GPIO_NUM_11      // Data from C5 GPIO 26
+#define PIN_SPI_CS       GPIO_NUM_25      // Valid/CS from C5 GPIO 25
+
+spi_bus_config_t buscfg = {
+    .mosi_io_num = PIN_SPI_MOSI,
+    .miso_io_num = -1,                    // No MISO needed
+    .sclk_io_num = PIN_SPI_SCLK,
+    .max_transfer_sz = LED_MAX_FRAME_SIZE, // 8008 bytes
+    .flags = SPICOMMON_BUSFLAG_SLAVE
+};
+
+spi_slave_interface_config_t slvcfg = {
+    .mode = 0,                            // CPOL=0, CPHA=0
+    .spics_io_num = PIN_SPI_CS,
+    .queue_size = QUEUE_SIZE,             // 8 transaction queue
+    .flags = 0,
+    .post_setup_cb = NULL,
+    .post_trans_cb = NULL
+};
+```
+
+### Frame Reception & Processing
+
+**DMA Buffer Management:**
+```cpp
+struct led_controller_t {
+    spi_slave_transaction_t trans[QUEUE_SIZE];  // Transaction descriptors
+    uint8_t *rxbuf[QUEUE_SIZE];                 // 8KB DMA buffers
+    QueueHandle_t frame_queue;                  // Processing queue
+    rmt_channel_handle_t rmt_channels[2];       // RMT channels 2&3
+    rmt_encoder_handle_t led_encoders[2];       // LED encoders
+    rmt_sync_manager_handle_t sync_manager;     // Synchronized output
+    // Statistics
+    uint32_t frames_received;
+    uint32_t frames_processed;
+    uint32_t crc_errors;
+    uint32_t frame_errors;
+};
+
+// Initialize with pre-allocated DMA buffers
+for (int i = 0; i < QUEUE_SIZE; i++) {
+    controller->rxbuf[i] = spi_bus_dma_memory_alloc(SPI_HOST, LED_MAX_FRAME_SIZE, 0);
+    controller->trans[i].length = LED_MAX_FRAME_SIZE * 8;  // Length in bits
+    controller->trans[i].rx_buffer = controller->rxbuf[i];
+    spi_slave_queue_trans(SPI_HOST, &controller->trans[i], portMAX_DELAY);
+}
+```
+
+**Frame Validation:**
+```cpp
+typedef struct __attribute__((packed)) {
+    uint16_t magic;        // 0x4C45 ("LE" - Little Endian marker)
+    uint16_t ch2_pixels;   // Channel 2 pixel count (0-1000)
+    uint16_t ch3_pixels;   // Channel 3 pixel count (0-1000)  
+    uint16_t crc16;        // CRC16-CCITT of payload data
+} led_frame_header_t;
+
+bool validate_frame(uint8_t *frame_data, size_t frame_size) {
+    led_frame_header_t *header = (led_frame_header_t *)frame_data;
+    
+    // Check magic number
+    if (header->magic != 0x4C45) {
+        ESP_LOGW(TAG, "Invalid frame magic: 0x%04X", header->magic);
+        return false;
+    }
+    
+    // Validate pixel counts
+    if (header->ch2_pixels > MAX_PIXELS_PER_CHANNEL || 
+        header->ch3_pixels > MAX_PIXELS_PER_CHANNEL) {
+        ESP_LOGW(TAG, "Invalid pixel counts: ch2=%d, ch3=%d", 
+                 header->ch2_pixels, header->ch3_pixels);
+        return false;
+    }
+    
+    // Verify frame size
+    size_t expected_size = sizeof(led_frame_header_t) + 
+                          (header->ch2_pixels + header->ch3_pixels) * 4;
+    if (frame_size < expected_size) {
+        ESP_LOGW(TAG, "Frame too small: %d < %d", frame_size, expected_size);
+        return false;
+    }
+    
+    // Validate CRC
+    uint8_t *payload = frame_data + sizeof(led_frame_header_t);
+    size_t payload_size = (header->ch2_pixels + header->ch3_pixels) * 4;
+    uint16_t computed_crc = crc16_ccitt_lut(payload, payload_size);
+    
+    if (computed_crc != header->crc16) {
+        ESP_LOGW(TAG, "CRC mismatch: computed=0x%04X, expected=0x%04X", 
+                 computed_crc, header->crc16);
+        return false;
+    }
+    
+    return true;
+}
+```
+
+### RMT LED Output
+
+**RMT Channel Configuration:**
+```cpp
+// File: main/spi_led_controller.c
+rmt_tx_channel_config_t tx_config = {
+    .clk_src = RMT_CLK_SRC_DEFAULT,
+    .gpio_num = (i == 0) ? RMT_CH2_GPIO : RMT_CH3_GPIO,  // GPIO 27, 26
+    .mem_block_symbols = 48,               // 48 symbols (384 bytes)
+    .resolution_hz = 32000000,             // 32 MHz for precise timing
+    .trans_queue_depth = 8,                // 8 pending transactions
+    .intr_priority = 3,                    // High priority
+    .flags.invert_out = false,             // Normal polarity
+    .flags.with_dma = true                 // Enable DMA
+};
+```
+
+**WS2812 Protocol Encoder:**
+```cpp
+// File: main/led_strip_encoder.c - 32MHz timing
+rmt_bytes_encoder_config_t bytes_cfg = {
+    .bit0 = {
+        .duration0 = 10,    // T0H: 312.5ns (10 × 31.25ns)
+        .level0 = 1,        // High level
+        .duration1 = 29,    // T0L: 906.25ns (29 × 31.25ns)  
+        .level1 = 0         // Low level
+    },
+    .bit1 = {
+        .duration0 = 29,    // T1H: 906.25ns (29 × 31.25ns)
+        .level0 = 1,        // High level
+        .duration1 = 10,    // T1L: 312.5ns (10 × 31.25ns)
+        .level1 = 0         // Low level
+    },
+    .flags.msb_first = false  // LSB first for WS2812
+};
+```
+
+**Synchronized Output:**
+```cpp
+void transmit_led_frame(led_controller_t *ctrl, uint8_t *ch2_data, size_t ch2_len,
+                                                uint8_t *ch3_data, size_t ch3_len) {
+    rmt_transmit_config_t tx_config = {
+        .loop_count = 0,
+        .flags.eot_level = 0,
+        .flags.queue_nonblocking = false
+    };
+    
+    // Reset synchronization manager
+    ESP_ERROR_CHECK(rmt_sync_reset(ctrl->sync_manager));
+    
+    // Queue both channels simultaneously
+    ESP_ERROR_CHECK(rmt_transmit(ctrl->rmt_channels[0], ctrl->led_encoders[0], 
+                                ch2_data, ch2_len, &tx_config));
+    ESP_ERROR_CHECK(rmt_transmit(ctrl->rmt_channels[1], ctrl->led_encoders[1], 
+                                ch3_data, ch3_len, &tx_config));
+    
+    // Wait for completion of both channels
+    ESP_ERROR_CHECK(rmt_tx_wait_all_done(ctrl->rmt_channels[0], portMAX_DELAY));
+    ESP_ERROR_CHECK(rmt_tx_wait_all_done(ctrl->rmt_channels[1], portMAX_DELAY));
+    
+    // Send completion notification to C5
+    printf("+LED_DONE\r\n");
+}
+```
+
+## Custom AT Command Handlers
+
+### Command Registration System
+
+**Registration Pattern:**
+```cpp
+// File: main/EspAt_firmware.c
+void register_all_commands() {
+    static struct cat_command at_cmds[35];
+    size_t at_cmd_count = 0;
+    
+    // System commands
+    at_cmds[at_cmd_count++] = (struct cat_command){
+        .name = "+RST",
+        .run = at_cmd_rst,
+    };
+    
+    at_cmds[at_cmd_count++] = (struct cat_command){
+        .name = "+XSET", 
+        .write = xset_handler,
+        .read = xget_handler,
+        .test = xtest_handler,
+        .var = xvariables,
+        .var_num = sizeof(xvariables)/sizeof(xvariables[0])
+    };
+    
+    // BLE commands (10 commands)
+    size_t ble_count;
+    struct cat_command *ble_cmds = get_ble_commands(&ble_count);
+    memcpy(&at_cmds[at_cmd_count], ble_cmds, ble_count * sizeof(struct cat_command));
+    at_cmd_count += ble_count;
+    
+    // LED commands (3 commands)  
+    size_t led_count;
+    struct cat_command *led_cmds = get_led_commands(&led_count);
+    memcpy(&at_cmds[at_cmd_count], led_cmds, led_count * sizeof(struct cat_command));
+    at_cmd_count += led_count;
+    
+    // OTA command
+    at_cmds[at_cmd_count++] = (struct cat_command){
+        .name = "+OTAUPDATE", 
+        .write = at_cmd_otaupdate
+    };
+    
+    // Initialize CAT framework
+    cat_init(&io, at_cmds, at_cmd_count, buffer, sizeof(buffer));
+}
+```
+
+### LED AT Commands
+
+**File**: `main/at_led_commands.c`
+
+**AT+LED_PREP Implementation:**
+```cpp
+static cat_return_state at_cmd_led_prep_spi(const struct cat_command *cmd,
+                                             const uint8_t *data,
+                                             size_t size, size_t args_num) {
+    // Parse comma-separated pixel counts
+    uint16_t values[2];
+    size_t parsed_count;
+    if (!parse_led_integers(data, size, values, 2, &parsed_count) || parsed_count != 2) {
+        return CAT_RETURN_STATE_ERROR;
+    }
+    
+    uint16_t ch2_pixels = values[0];
+    uint16_t ch3_pixels = values[1];
+    
+    // Validate pixel counts
+    if (ch2_pixels > MAX_PIXELS_PER_CHANNEL || ch3_pixels > MAX_PIXELS_PER_CHANNEL) {
+        ESP_LOGW(TAG, "Invalid pixel counts: ch2=%d, ch3=%d", ch2_pixels, ch3_pixels);
+        return CAT_RETURN_STATE_ERROR;
+    }
+    
+    // Start LED controller reception
+    led_controller_err_t err = led_controller_start_receive(
+        g_spi_led_controller, ch2_pixels, ch3_pixels);
+    
+    if (err != LED_CONTROLLER_OK) {
+        ESP_LOGE(TAG, "Failed to start LED reception: %d", err);
+        return CAT_RETURN_STATE_ERROR;
+    }
+    
+    ESP_LOGI(TAG, "LED controller prepared: ch2=%d, ch3=%d", ch2_pixels, ch3_pixels);
+    return CAT_RETURN_STATE_OK;
+}
+```
+
+**AT+LED_STATS Implementation:**
+```cpp
+static cat_return_state at_cmd_led_stats_spi(const struct cat_command *cmd,
+                                              const uint8_t *data,
+                                              size_t size, size_t args_num) {
+    if (!g_spi_led_controller) {
+        printf("+LED_STATS:UNINITIALIZED,0,0,0,0\r\n");
+        return CAT_RETURN_STATE_OK;
+    }
+    
+    const char *state_str = "UNKNOWN";
+    switch (g_spi_led_controller->state) {
+        case LED_STATE_IDLE: state_str = "IDLE"; break;
+        case LED_STATE_PREPARED: state_str = "PREPARED"; break;
+        case LED_STATE_RECEIVING: state_str = "RECEIVING"; break;
+        case LED_STATE_PROCESSING: state_str = "PROCESSING"; break;
+    }
+    
+    printf("+LED_STATS:SPI,%s,%lu,%lu,%lu\r\n",
+           state_str,
+           g_spi_led_controller->frames_processed,
+           g_spi_led_controller->frame_errors,
+           g_spi_led_controller->crc_errors);
+           
+    return CAT_RETURN_STATE_OK;
+}
+```
+
+### OTA Update Handler
+
+**File**: `main/ota.c`
+
+**AT+OTAUPDATE Implementation:**
+```cpp
+static cat_return_state at_cmd_otaupdate(const struct cat_command *cmd,
+                                          const uint8_t *data,
+                                          size_t size, size_t args_num) {
+    ESP_LOGI(TAG, "Starting OTA update process");
+    
+    // Create OTA task and return HOLD state
+    xTaskCreate(ota_update_task, "ota_update", 8*1024, NULL, 4, NULL);
+    
+    return CAT_RETURN_STATE_HOLD;  // Suspend AT processing
+}
+
+void ota_update_task(void *arg) {
+    esp_ota_handle_t ota_handle = 0;
+    const esp_partition_t *update_partition = NULL;
+    
+    // Find update partition
+    update_partition = esp_ota_get_next_update_partition(NULL);
+    if (update_partition == NULL) {
+        sendOtaError(OTA_ERR_NO_PARTITION);
+        goto error_ret;
+    }
+    
+    // Wait for sync pattern (6 bytes: C0 FF FE AA 55 90)
+    uint8_t sync_pattern[6] = {0xC0, 0xFF, 0xFE, 0xAA, 0x55, 0x90};
+    if (!wait_for_sync_pattern(sync_pattern, sizeof(sync_pattern))) {
+        sendOtaError(OTA_ERR_SYNC_TIMEOUT);
+        goto error_ret;
+    }
+    
+    // Begin OTA process
+    ESP_ERROR_CHECK(esp_ota_begin(update_partition, OTA_SIZE_UNKNOWN, &ota_handle));
+    
+    // Stream firmware data
+    uint8_t data_buffer[1024];
+    size_t data_read = 0;
+    while ((data_read = read_ota_data(data_buffer, sizeof(data_buffer))) > 0) {
+        ESP_ERROR_CHECK(esp_ota_write(ota_handle, data_buffer, data_read));
+    }
+    
+    // Finalize OTA
+    ESP_ERROR_CHECK(esp_ota_end(ota_handle));
+    ESP_ERROR_CHECK(esp_ota_set_boot_partition(update_partition));
+    
+    printf("OK\r\n");
+    vTaskDelay(pdMS_TO_TICKS(1000));
+    esp_restart();
+    
+error_ret:
+    if (ota_handle) esp_ota_end(ota_handle);
+    printf("ERROR\r\n");
+    vTaskDelete(NULL);
+}
+```
+
+## Build and Flash Procedures
+
+### ESP-IDF Project Configuration
+
+**File**: `main/CMakeLists.txt`
+```cmake
+idf_component_register(
+    SRCS 
+        "EspAt_firmware.c"
+        "cat.c"
+        "ble_at_handler.c"
+        "gap.c"
+        "gatt_svc.c"
+        "at_led_commands.c"
+        "spi_led_controller.c"
+        "led_strip_encoder.c"
+        "ota.c"
+    INCLUDE_DIRS "."
+    REQUIRES 
+        nvs_flash
+        esp_driver_uart
+        esp_driver_spi
+        esp_driver_rmt
+        bt
+        app_update
+)
+```
+
+**Required sdkconfig Options:**
+```
+CONFIG_BT_ENABLED=y
+CONFIG_BT_NIMBLE_ENABLED=y
+CONFIG_BT_NIMBLE_ROLE_PERIPHERAL=y
+CONFIG_BT_NIMBLE_ROLE_CENTRAL=n
+CONFIG_BT_NIMBLE_MAX_CONNECTIONS=1
+CONFIG_BT_NIMBLE_MAX_CCCDS=8
+
+CONFIG_ESP_SYSTEM_EVENT_TASK_STACK_SIZE=4096
+CONFIG_FREERTOS_HZ=1000
+CONFIG_ESP_DEFAULT_CPU_FREQ_96=y
+
+CONFIG_PARTITION_TABLE_CUSTOM=y
+CONFIG_PARTITION_TABLE_CUSTOM_FILENAME="partitions.csv"
+```
+
+**Partition Table** (`partitions.csv`):
+```
+# Name,     Type, SubType, Offset,  Size, Flags
+nvs,        data, nvs,     0x9000,  0x6000,
+phy_init,   data, phy,     0xf000,  0x1000,
+factory,    app,  factory, 0x10000, 0x180000,
+ota_0,      app,  ota_0,   0x190000,0x180000,
+ota_1,      app,  ota_1,   0x310000,0x180000,
+ota_data,   data, ota,     0x490000,0x2000,
+```
+
+### Build Commands
+
+```bash
+# Configure for ESP32-H2
+idf.py set-target esp32h2
+
+# Configure project
+idf.py menuconfig
+
+# Build firmware
+idf.py build
+
+# Flash and monitor
+idf.py flash monitor
+
+# Flash specific address (for OTA testing)
+esptool.py --port /dev/ttyUSB0 write_flash 0x190000 build/EspAt_firmware.bin
+```
+
+### Performance Characteristics
+
+**Memory Usage:**
+- **RAM**: ~70KB available (after BLE stack and buffers)
+- **Flash**: ~400KB firmware size
+- **Stack**: 8KB (CAT) + 4KB×2 (LED) + 4KB (BLE) = 20KB total
+
+**Real-time Performance:**
+- **SPI Reception**: 80 MHz, DMA-based, &lt;1% CPU
+- **Frame Processing**: ~5µs CRC validation
+- **RMT Output**: Synchronized dual-channel with &lt;5µs latency
+- **BLE Latency**: Standard BLE characteristics (&lt;50ms)
+
+This ESP32-H2 implementation provides a robust, real-time capable platform for distributed LED control with comprehensive BLE connectivity and field-upgradeable firmware through the dual-MCU AT command interface.
