@@ -5,7 +5,7 @@ description: "Complete reference for all AT commands in the dual-MCU lighting sy
 
 # AT Commands API Reference
 
-This section provides detailed documentation for all AT commands used in the Watts v3 dual-MCU lighting system. Commands are organized by functional category.
+This section provides detailed documentation for all AT commands used in the Watts v3 dual-MCU lighting system (ESP32-C5 + ESP32 WROOM). Commands are organized by functional category.
 
 ## Command Categories
 
@@ -51,10 +51,12 @@ AT+COMMAND[=param1[,param2[,...]]]
 
 ### Unsolicited Result Codes (URCs)
 
-URCs are asynchronous messages sent by the ESP32-H2 to notify the ESP32-C5 of events:
+URCs are asynchronous messages sent by the ESP32 WROOM to notify the ESP32-C5 of events:
 
 | URC | Description |
 |-----|-------------|
+| `+H2_ALIVE:0` | WROOM alive but not initialized (sent every 10s) |
+| `+H2_ALIVE:1` | WROOM alive and fully initialized (sent every 10s) |
 | `+LED_DONE` | LED frame processing complete |
 | `+BLEGATTSRECV:hexdata` | BLE data received from client |
 | `+ERROR:code` | Error notification |
@@ -63,8 +65,9 @@ URCs are asynchronous messages sent by the ESP32-H2 to notify the ESP32-C5 of ev
 
 - **UART Settings**: 5 Mbaud, 8N1, Hardware flow control
 - **Timeout**: Variable by command type (100ms - 30s)
-- **Direction**: ESP32-C5 (master) → ESP32-H2 (slave)
-- **Framework**: Tiny-CAT AT parser on ESP32-H2
+- **Direction**: ESP32-C5 (master) → ESP32 WROOM (slave)
+- **Framework**: Tiny-CAT AT parser on ESP32 WROOM
+- **Heartbeat**: WROOM sends `+H2_ALIVE` every 10 seconds for health monitoring
 
 ## Quick Reference
 
@@ -77,7 +80,8 @@ AT+BLENAME="Watts-Controller"
 AT+BLEADVSTART
 
 # LED frame coordination (called automatically by NeoPixelBus)
-AT+LED_PREP=500,300
+# 4 channels with pixel counts and formats (3=RGB, 4=RGBW)
+AT+LED_PREP=150,200,100,250,3,3,3,3
 
 # System management
 AT+LED_STATS
@@ -90,33 +94,81 @@ AT+RST
 ```cpp
 #include "ATHost.h"
 
-// Initialize BLE on H2
+// Initialize BLE on WROOM
 ATHost_sendATWaitOK("AT+BLEINIT=2", 5000);
 ATHost_sendATWaitOK("AT+BLENAME=\"Watts-v3\"", 1000);
 
-// Prepare LED frame
-if (ATHost_sendLedPrep(500, 300, 100)) {
-    // H2 ready to receive frame data
+// Prepare LED frame (8 parameters: 4 pixel counts + 4 formats)
+char cmd[128];
+snprintf(cmd, sizeof(cmd), "AT+LED_PREP=%u,%u,%u,%u,%u,%u,%u,%u",
+         150, 200, 100, 250,  // pixel counts for channels 0-3
+         3, 3, 3, 3);         // formats (3=RGB, 4=RGBW)
+
+if (ATHost_sendATWaitOK(cmd, 1000)) {
+    // WROOM ready to receive frame data
+    ESP_LOGI("AT", "WROOM configured for 4-channel LED output");
 }
 ```
 
-#### H2 (Command Handler) Implementation
+#### WROOM (Command Handler) Implementation
 ```c
+// File: main/at_led_commands.c
 #include "cat.h"
 
-// Command handler function
-at_result_t at_cmd_led_prep_spi(at_cmd_t *cmd, at_calldir_t dir) {
-    if (dir == AT_CMD_DIR_SET) {
-        int ch2_pixels = at_get_i(cmd, 0);
-        int ch3_pixels = at_get_i(cmd, 1);
-        
-        // Prepare SPI slave for frame reception
-        spi_led_prepare(ch2_pixels, ch3_pixels);
-        
-        return AT_RESULT_OK;
+cat_return_state at_led_prep(const struct cat_command *cmd,
+                             const uint8_t *data, size_t size, size_t args_num) {
+    if (args_num != 8) {
+        return CAT_RETURN_STATE_ERROR;  // Require 8 parameters
     }
-    return AT_RESULT_ERROR;
+
+    // Parse 8 parameters: px[0-3], fmt[0-3]
+    uint16_t px[4];
+    uint8_t fmt[4];
+    for (int i = 0; i < 4; i++) {
+        px[i] = /* parse pixel count */;
+        fmt[i] = /* parse format */;
+    }
+
+    // Configure SPI LED controller
+    esp_err_t ret = spi_led_controller_config(px, fmt);
+    if (ret != ESP_OK) {
+        return CAT_RETURN_STATE_ERROR;
+    }
+
+    // Mark system as initialized (heartbeat will now send +H2_ALIVE:1)
+    h2_system_initialized = true;
+
+    return CAT_RETURN_STATE_OK;
 }
 ```
+
+#### Heartbeat Monitoring (C5 Side)
+```cpp
+// File: components/wled/lightpipe_state.h
+#include "lightpipe_state.h"
+
+// Parse +H2_ALIVE URCs from WROOM
+void onATResponseReceived(const char* response) {
+    if (strncmp(response, "+H2_ALIVE:", 10) == 0) {
+        bool initialized = (response[10] == '1');
+
+        // Update LightPipe state manager
+        lightPipe.onHeartbeatReceived(initialized);
+
+        // Reinitialize if needed
+        if (lightPipe.needsReinit() && lightPipe.isAlive()) {
+            sendLedPrepCommand();  // Resend AT+LED_PREP
+            lightPipe.markLightPipeInitialized();
+        }
+    }
+}
+```
+
+## See Also
+
+- **[ESP32-C5 Implementation](../../esp32-c5-implementation.mdx)** - Main controller architecture and NeoPixelBus integration
+- **[ESP32 WROOM Implementation](../../esp32-wroom-implementation.mdx)** - Secondary controller with AT firmware and SPI LED controller
+- **[AT Protocol Guide](../../at-protocol.mdx)** - Complete protocol specification and communication flow
+- **[Frame Data Protocol](../../frame-data-protocol.mdx)** - Binary frame format and CRC validation
 
 This API reference provides comprehensive documentation for all AT commands, enabling developers to understand and extend the dual-MCU communication protocol.

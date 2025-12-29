@@ -5,47 +5,99 @@ description: "AT commands for LED frame coordination and control"
 
 # LED Control AT Commands
 
-LED control commands manage the high-speed coordination of LED frame data between the ESP32-C5 and ESP32-H2 MCUs.
+LED control commands manage the high-speed coordination of LED frame data between the ESP32-C5 and ESP32 WROOM MCUs.
 
 ## AT+LED_PREP
 
-Prepares the ESP32-H2 to receive LED frame data via SPI slave interface.
+Prepares the ESP32 WROOM to receive LED frame data via SPI slave interface for all 4 LED channels.
 
 **Parameters:**
-- `ch2_pixels` (integer, required): Number of pixels for LED channel 2 (0-1000)
-- `ch3_pixels` (integer, required): Number of pixels for LED channel 3 (0-1000)
+- `px0` (integer, required): Number of pixels for LED channel 0 (0-1200, 0 = disabled)
+- `px1` (integer, required): Number of pixels for LED channel 1 (0-1200, 0 = disabled)
+- `px2` (integer, required): Number of pixels for LED channel 2 (0-1200, 0 = disabled)
+- `px3` (integer, required): Number of pixels for LED channel 3 (0-1200, 0 = disabled)
+- `fmt0` (integer, required): Color format for channel 0 (3=RGB, 4=RGBW)
+- `fmt1` (integer, required): Color format for channel 1 (3=RGB, 4=RGBW)
+- `fmt2` (integer, required): Color format for channel 2 (3=RGB, 4=RGBW)
+- `fmt3` (integer, required): Color format for channel 3 (3=RGB, 4=RGBW)
 
 ### Request
 ```
-AT+LED_PREP=<ch2_pixels>,<ch3_pixels>
+AT+LED_PREP=<px0>,<px1>,<px2>,<px3>,<fmt0>,<fmt1>,<fmt2>,<fmt3>
 ```
 
 ### Response
 ```
-OK      # H2 ready to receive frame data
+OK      # WROOM ready to receive frame data
 ERROR   # Failed to prepare (invalid params or busy)
 ```
 
-### Example
+### Examples
+
+**Example 1: All 4 channels active with RGB**
 ```bash
-AT+LED_PREP=500,300
+AT+LED_PREP=150,200,100,250,3,3,3,3
 OK
 
-# ESP32-H2 now ready to receive frame data for:
-# - Channel 2: 500 pixels  
-# - Channel 3: 300 pixels
+# ESP32 WROOM now ready to receive:
+# - Channel 0: 150 pixels, RGB format (450 bytes)
+# - Channel 1: 200 pixels, RGB format (600 bytes)
+# - Channel 2: 100 pixels, RGB format (300 bytes)
+# - Channel 3: 250 pixels, RGB format (750 bytes)
+# Total payload: 2,100 bytes + 12-byte header
+```
+
+**Example 2: Mixed RGB and RGBW formats**
+```bash
+AT+LED_PREP=100,0,150,200,3,3,4,4
+OK
+
+# Configuration:
+# - Channel 0: 100 pixels, RGB (300 bytes)
+# - Channel 1: Disabled (0 pixels)
+# - Channel 2: 150 pixels, RGBW (600 bytes)
+# - Channel 3: 200 pixels, RGBW (800 bytes)
+# Total payload: 1,700 bytes + 12-byte header
+```
+
+**Example 3: Only channels 2 and 3 (legacy compatibility)**
+```bash
+AT+LED_PREP=0,0,500,300,3,3,3,3
+OK
+
+# Only channels 2 and 3 active:
+# - Channel 2: 500 pixels, RGB (1,500 bytes)
+# - Channel 3: 300 pixels, RGB (900 bytes)
 ```
 
 ### Implementation Details
-- **Timeout**: 100ms (time-critical operation)
-- **SPI Setup**: Configures SPI slave DMA for frame reception
-- **Frame Format**: Expects 8-byte header + pixel data
-- **Maximum Frame**: 8,008 bytes (1000 pixels × 4 bytes × 2 channels + header)
+- **Timeout**: 1000ms (configuration operation)
+- **SPI Setup**: Configures SPI slave DMA for 4-channel frame reception
+- **Frame Format**: 12-byte header + concatenated channel pixel data
+- **Maximum Frame**: 19,212 bytes (12 header + 1200 pixels × 4 bytes × 4 channels)
+- **Channel Allocation**: Dynamically allocates NeoPixelBus RMT instances for active channels
+- **Memory Management**: Right-sized DMA buffers based on active channels and formats
 
 ### Error Conditions
-- Invalid pixel counts (negative or > 1000)
+- Invalid pixel counts (negative or > 1200)
+- Invalid color format (not 3 or 4)
 - SPI slave already busy with previous frame
 - Insufficient memory for frame buffer allocation
+- NeoPixelBus RMT channel allocation failure
+
+### Channel Configuration
+The command configures the WROOM's NeoPixelBus RMT output:
+
+| Channel | RMT Unit | Protocol | GPIO |
+|---------|----------|----------|------|
+| 0 | RMT0 | WS2812/SK6812 | Configurable |
+| 1 | RMT1 | WS2812/SK6812 | Configurable |
+| 2 | RMT2 | WS2812/SK6812 | Configurable |
+| 3 | RMT3 | WS2812/SK6812 | Configurable |
+
+**Format Selection**:
+- **3 (RGB)**: WS2812 protocol, 3 bytes per pixel (GRB order)
+- **4 (RGBW)**: SK6812 protocol, 4 bytes per pixel (GRBW order)
 
 ---
 
@@ -159,35 +211,66 @@ Sent automatically when the ESP32-H2 completes processing a LED frame.
 The LED commands integrate automatically with the NeoPixelBus framework on ESP32-C5:
 
 ```cpp
-// NeoEsp32ParlC5SharedManager.h integration
-void _sendH2PrepCommand() {
-    uint16_t ch2_pixels = _channels[2].registered ? _channels[2].pixelCount : 0;
-    uint16_t ch3_pixels = _channels[3].registered ? _channels[3].pixelCount : 0;
-    
-    // Only send if pixel counts changed
-    if (ch2_pixels == _lastCh2 && ch3_pixels == _lastCh3) return;
-    _lastCh2 = ch2_pixels;
-    _lastCh3 = ch3_pixels;
+// File: components/NeoPixelBus/src/internal/methods/NeoEsp32ParlC5SharedManager.h
+void _sendLightPipePrepCommand() {
+    // Collect pixel counts and formats from all 4 channels
+    uint16_t px[4];
+    uint8_t fmt[4];
+    for (int i = 0; i < 4; i++) {
+        px[i] = _channels[i].registered ? _channels[i].pixelCount : 0;
+        fmt[i] = _channels[i].elementSize; // 3=RGB, 4=RGBW
+    }
 
-    char cmd[64];
-    snprintf(cmd, sizeof(cmd), "AT+LED_PREP=%d,%d", ch2_pixels, ch3_pixels);
+    // Check if configuration changed
+    bool changed = false;
+    for (int i = 0; i < 4; i++) {
+        if (px[i] != _lastPx[i] || fmt[i] != _lastFmt[i]) {
+            changed = true;
+            break;
+        }
+    }
+    if (!changed) return;
 
-    bool success = ATHost_sendATWaitOK(cmd, 1000); // 1000ms timeout
-    if (!success) {
-        ESP_LOGW(TAG, "Failed to send LED_PREP to H2");
-        _handleH2CommunicationError();
+    // Update cache
+    for (int i = 0; i < 4; i++) {
+        _lastPx[i] = px[i];
+        _lastFmt[i] = fmt[i];
+    }
+
+    // Send AT command with 8 parameters
+    char cmd[128];
+    snprintf(cmd, sizeof(cmd), "AT+LED_PREP=%u,%u,%u,%u,%u,%u,%u,%u",
+             px[0], px[1], px[2], px[3], fmt[0], fmt[1], fmt[2], fmt[3]);
+
+    bool ok = ATHost_sendATWaitOK(cmd, 1000); // 1000ms timeout
+    if (ok) {
+        ESP_LOGI(TAG, "Sent LED_PREP: px=[%u,%u,%u,%u] fmt=[%u,%u,%u,%u]",
+                 px[0], px[1], px[2], px[3], fmt[0], fmt[1], fmt[2], fmt[3]);
+        lightPipe.markLightPipeInitialized();
     } else {
-        ESP_LOGD(TAG, "Sent LED_PREP to H2: ch2=%d, ch3=%d", ch2_pixels, ch3_pixels);
+        ESP_LOGW(TAG, "Failed to send LED_PREP to WROOM");
     }
 }
 ```
 
 ### Automatic Frame Coordination
 
-1. **WLED Render**: Calculates full 4-channel frame
-2. **AT+LED_PREP**: Notifies H2 of channels 2&3 pixel counts
-3. **ParlIO Stream**: 80MHz data transmission to H2 SPI slave
-4. **+LED_DONE**: H2 confirms frame processing complete
-5. **Next Frame**: Process repeats for next frame
+The complete LED frame coordination sequence:
 
-This coordination ensures perfect synchronization between local (C5) and remote (H2) LED outputs.
+1. **WLED Render**: Calculates full 4-channel frame on ESP32-C5
+2. **Configuration Check**: Shared manager detects if channel setup changed
+3. **AT+LED_PREP**: Sends 8-parameter command to configure WROOM
+4. **Buffer Allocation**: WROOM allocates NeoPixelBus instances for active channels
+5. **Frame Assembly**: C5 creates 12-byte header + concatenated channel data
+6. **GPIO Handshake**: C5 waits for WROOM READY signal
+7. **ParlIO Transmission**: 30MHz data stream to WROOM SPI slave
+8. **Frame Validation**: WROOM verifies magic number and CRC16
+9. **LED Output**: WROOM copies data to NeoPixelBus and triggers RMT output
+10. **GPIO Complete**: WROOM signals DONE via MISO pin
+11. **Next Frame**: Process repeats for next WLED frame update
+
+This coordination ensures perfect synchronization between all 4 LED channels distributed across the dual-MCU system.
+
+See also:
+- [ESP32-C5 LightPipe State Management](../../esp32-c5-implementation.mdx#lightpipe-state-management) - How the C5 monitors WROOM health
+- [ESP32 WROOM SPI LED Controller](../../esp32-wroom-implementation.mdx#spi-led-controller) - WROOM frame reception implementation
