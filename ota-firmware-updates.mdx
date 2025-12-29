@@ -101,7 +101,7 @@ http://192.168.1.100:8080/h2/30EDA0E424A4/2.0.1
 
 ### Update State Machine
 
-The WROOM update process follows a 6-state machine defined in [h2_ota.h](src/Watts-ESP-IDF-C5/components/athost/src/h2_ota.h#L14-L22):
+The WROOM update process follows a 6-state machine defined in `h2_ota.h`:
 
 ```c
 typedef enum {
@@ -240,12 +240,14 @@ The WROOM firmware ([ota.c](src/ESP32 Wroom LED Driver firmware/main/ota.c)) imp
 5. **Streaming Reception**: Receives remaining chunks with 200ms read timeout per chunk
 6. **Completion**: After 3-second idle timeout, calls `esp_ota_end()` and reboots
 
-**WROOM Error Codes** (sent as `+OTAERR:<code>`):
+**WROOM Error Codes** (sent as `+OTAERR:<code>`, defined in `ota.h`):
 - `1` - SYNC_TIMEOUT: Sync header not received or mismatch
 - `2` - VERSION_ABORT: Version identical to running or last-invalid
 - `3` - UART: UART read/write error
 - `4` - FLASH_WRITE: `esp_ota_write()` failed
 - `5` - VALIDATE_FAILED: `esp_ota_end()` validation failed
+- `6` - STREAM_TIMEOUT: No new bytes received during streaming
+- `7` - UNEXPECTED_PACKET: Reserved (not used currently)
 - `8` - UNKNOWN: Other errors (e.g., buffer allocation failure)
 
 ### Error Handling
@@ -489,6 +491,18 @@ void loop() {
 - Ensure state machine is called in main loop
 - Check WiFi signal strength and stability
 - Monitor WROOM logs for buffer warnings
+
+---
+
+## Source Code References
+
+| Component | File | Description |
+|-----------|------|-------------|
+| **C5 OTA State Machine** | `h2_ota.cpp` | `processH2OTAStateMachine()`, chunk download/transmit |
+| **C5 OTA Header** | `h2_ota.h` | `h2_ota_state_t` enum, API declarations |
+| **WROOM OTA Receiver** | `ota.c` | Binary stream reception, flash writing |
+| **WROOM Error Codes** | `ota.h` | `OTA_ERR_*` error code definitions |
+| **MQTT Commands** | `mqtt.cpp` | `updateFirmware`, `updateH2Firmware` handlers |
 
 ---
 

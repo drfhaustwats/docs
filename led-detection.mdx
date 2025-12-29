@@ -307,7 +307,7 @@ struct LedDetectAllResult {
 
 ## Detection Parameters
 
-These constants are defined in [led_detect.cpp](src/Watts-ESP-IDF-C5/components/wled/led_detect.cpp#L12-L17):
+These constants are defined in `led_detect.cpp`:
 
 ```cpp
 static const uint8_t TEST_BRIGHTNESS = 0x80;         // 50% brightness for test
@@ -541,6 +541,18 @@ void setup() {
     // (doInitBusses flag already set by led_detect_apply_result)
 }
 ```
+
+---
+
+## Source Code References
+
+| Component | File | Description |
+|-----------|------|-------------|
+| **Detection Core** | `led_detect.cpp` | Binary search algorithm, current measurement |
+| **Detection API** | `led_detect.h` | `LedDetectResult`, `led_detect_run()` interfaces |
+| **HTTP Endpoint** | `wled_server.cpp` | `/detectLeds` REST API handler |
+| **MQTT Handler** | `mqtt.cpp` | `detectLeds` command processing |
+| **Power Board** | `watts_power_board.cpp` | Current measurement via INA237 |
 
 ---
 
