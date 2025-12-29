@@ -17,9 +17,7 @@ System initialization and setup commands:
 
 ### LED Control Commands
 High-speed LED coordination between MCUs:
-- [AT+LED_PREP](/api-reference/at-commands/led#at-led-prep) - Prepare LED frame reception
-- [AT+LED_STATS](/api-reference/at-commands/led#at-led-stats) - Get LED controller statistics
-- [AT+LED_RESET](/api-reference/at-commands/led#at-led-reset) - Reset LED controller
+- [AT+LED_PREP](/api-reference/at-commands/led#at-led-prep) - Prepare LED frame reception (4-channel with pixel counts and formats)
 
 ### BLE Management Commands
 Bluetooth Low Energy operations:
@@ -84,7 +82,6 @@ AT+BLEADVSTART
 AT+LED_PREP=150,200,100,250,3,3,3,3
 
 # System management
-AT+LED_STATS
 AT+RST
 ```
 
