@@ -102,9 +102,9 @@ parlio_tx_unit_config_t config = {
 **GPIO Assignments:**
 ```cpp
 parlio_tx_gpio_config_t gpio_config = {
-    .clk_out_pin = GPIO_NUM_10,    // 30MHz clock to ESP32 WROOM
-    .valid_pin = GPIO_NUM_25,      // Frame valid signal (active high)
-    .data_pins = {GPIO_NUM_26}     // Serial data (WLED 3rd LED output)
+    .clk_out_pin = PINS.spi.sclk,  // GPIO 23: 30MHz clock to ESP32 WROOM
+    .valid_pin = PINS.spi.cs,      // GPIO 28: Frame valid signal (active high)
+    .data_pins = {PINS.spi.mosi}   // GPIO 8: Serial data
 };
 ```
 
@@ -128,8 +128,8 @@ The ESP32 WROOM receives the ParlIO stream via SPI slave interface:
 
 ```cpp
 spi_bus_config_t buscfg = {
-    .mosi_io_num = GPIO_NUM_11,          // Data from C5 GPIO 26
-    .sclk_io_num = GPIO_NUM_10,          // Clock from C5 GPIO 10
+    .mosi_io_num = PINS.spis.mosi,       // GPIO 23: Data from C5 GPIO 8
+    .sclk_io_num = PINS.spis.sck,        // GPIO 18: Clock from C5 GPIO 23
     .max_transfer_sz = 16012,            // Maximum frame size (4 channels)
     .flags = SPICOMMON_BUSFLAG_MASTER |
              SPICOMMON_BUSFLAG_SLAVE     // Dual-mode capability
@@ -137,7 +137,7 @@ spi_bus_config_t buscfg = {
 
 spi_slave_interface_config_t slvcfg = {
     .mode = 0,                           // CPOL=0, CPHA=0
-    .spics_io_num = GPIO_NUM_25,         // Valid/CS from C5 GPIO 25
+    .spics_io_num = PINS.spis.cs,        // GPIO 5: Valid/CS from C5 GPIO 28
     .queue_size = 8,                     // 8 transaction queue depth
     .flags = SPI_SLAVE_BIT_LSBFIRST      // LSB first reception
 };

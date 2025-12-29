@@ -417,11 +417,11 @@ if (readyTimeoutCount > 3) {
 
 // Level 2: Hardware reset of WROOM after 3 force resets
 if (forceResetCount >= 3) {
-    gpio_set_direction(WROOM_RST_PIN, GPIO_MODE_OUTPUT);  // GPIO26
-    gpio_set_level(WROOM_RST_PIN, 0);   // Assert reset (active LOW)
+    gpio_set_direction(WR_EN_PIN, GPIO_MODE_OUTPUT);  // GPIO 26
+    gpio_set_level(WR_EN_PIN, 0);   // Assert reset (active LOW)
     vTaskDelay(pdMS_TO_TICKS(200));     // Hold 200ms
-    gpio_set_level(WROOM_RST_PIN, 1);   // Release reset
-    gpio_set_direction(WROOM_RST_PIN, GPIO_MODE_INPUT);
+    gpio_set_level(WR_EN_PIN, 1);   // Release reset
+    gpio_set_direction(WR_EN_PIN, GPIO_MODE_INPUT);
 }
 ```
 
@@ -719,9 +719,9 @@ parlio_tx_unit_config_t config = {
 
 // GPIO Configuration
 parlio_tx_gpio_config_t gpio_config = {
-    .clk_out_pin = PINS.spi.sclk,      // Clock to WROOM
-    .valid_pin = GPIO_NUM_25,           // Frame valid signal
-    .data_pins = {PINS.hardware.led.pin[2]},  // Data pin (WLED output 3)
+    .clk_out_pin = PINS.spi.sclk,      // Clock to WROOM (GPIO 23)
+    .valid_pin = PINS.spi.cs,           // Frame valid signal (GPIO 28)
+    .data_pins = {PINS.spi.mosi},       // Data pin (GPIO 8)
 };
 ```
 
@@ -729,11 +729,12 @@ parlio_tx_gpio_config_t gpio_config = {
 
 | Pin | Function | Direction | Description |
 |-----|----------|-----------|-------------|
-| `PINS.spi.sclk` | ParlIO Clock | Output | 30MHz clock to ESP32 WROOM |
-| `GPIO_NUM_25` | ParlIO Valid | Output | Frame valid signal |
-| `PINS.hardware.led.pin[2]` | ParlIO Data | Output | Serial data (WLED output 3) |
-| `PINS.spi.miso` | Handshake | Input | WROOM READY/DONE signal |
-| `GPIO_NUM_26` | WROOM Reset | Bidir | Hardware reset control |
+| `PINS.spi.sclk` (GPIO 23) | ParlIO Clock | Output | 30MHz clock to ESP32 WROOM |
+| `PINS.spi.cs` (GPIO 28) | ParlIO Valid | Output | Frame valid signal |
+| `PINS.spi.mosi` (GPIO 8) | ParlIO Data | Output | Serial data transmission |
+| `PINS.spi.miso` (GPIO 10) | Handshake | Input | WROOM READY/DONE signal |
+| GPIO 26 | WR_EN | Output | WROOM reset/enable control |
+| GPIO 27 | WR_BOOT | Output | WROOM boot mode control |
 
 ### Memory Management
 
@@ -906,7 +907,7 @@ Configure WLED to use the distributed LED system:
 1. **Hardware Configuration**:
    - Configure LED outputs in WLED UI (any GPIOs work - they're placeholders)
    - The actual output happens on ESP32 WROOM via ParlIO
-   - Ensure output 3 pin matches `PINS.hardware.led.pin[2]` (used for ParlIO data)
+   - ParlIO uses `PINS.spi.mosi` (GPIO 8), `PINS.spi.sclk` (GPIO 23), `PINS.spi.cs` (GPIO 28)
 
 2. **LED Strip Configuration**:
    ```json
@@ -1022,8 +1023,8 @@ The implementation requires these custom components:
 
 **WROOM hardware resets**:
 - Indicates persistent communication failures (3+ force resets)
-- Check physical connections: ParlIO clock, data, handshake GPIO
-- Verify WROOM_RST_PIN (GPIO26) connection
+- Check physical connections: ParlIO clock (GPIO 23), data (GPIO 8), valid (GPIO 28), handshake (GPIO 10)
+- Verify WR_EN (GPIO 26) and WR_BOOT (GPIO 27) connections
 
 ### Debug Logging
 

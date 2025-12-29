@@ -218,6 +218,51 @@ The Watts Power Board is an I2C-based power monitoring and management system tha
 - **Frequency**: 100 kHz
 - **Access Pattern**: Serialized via FreeRTOS I2C worker task
 
+### Physical Connectors & Pinouts
+
+#### Main Board Connector (J1 - PH62-14P2-14P22)
+Connection to ESP32-C5 main board:
+
+| Pin | Signal | Direction | Description |
+|-----|--------|-----------|-------------|
+| 1-3 | - | - | Not connected |
+| 2 | W5500_CS | Input | W5500 chip select from C5 GPIO 28 |
+| 4 | MOSI | Input | SPI data from C5 GPIO 8 |
+| 5-6 | - | - | Not connected |
+| 7-8 | SPI_INT / I2C_SDA | I/O | SPI interrupt / I2C data (GPIO 7) |
+| 9 | I2C_SCL | Input | I2C clock from C5 GPIO 9 |
+| 10 | DATA0-DATA3 | Input | Parallel data inputs |
+| 11-12 | - | - | Parallel data inputs (continued) |
+| 13-14 | 8-60V / GND | Power | Main power input |
+
+#### LED Output Connectors (O2-O5 - RJ45)
+Standard RJ45 connectors for each of 4 LED channels:
+
+| Pin | Signal | Description |
+|-----|--------|-------------|
+| 1 | DRAIN | LED strip drain connection |
+| 2 | GATE | MOSFET gate control from A3942 |
+| 3 | SOURCE | LED strip source connection |
+| 4-8 | - | Reserved for future use |
+
+#### Programming Connector (CN1 - TC2030-CTX-NL)
+STM32 programming interface:
+
+| Pin | Signal | Description |
+|-----|--------|-------------|
+| 1 | VCC | 3.3V power |
+| 2 | SWD_SWDIO | Serial wire debug data |
+| 3 | NRS'nRST | Reset signal |
+| 4 | SWC_SWCLK | Serial wire debug clock |
+| 5 | GND | Ground |
+| 6 | TDO | Test data output (SWO) |
+
+#### Configuration Connectors
+| Connector | Signal | Description |
+|-----------|--------|-------------|
+| CN4, CN5 | DATA0, DATA1 | Data channel routing (DB126V-5.0-3P-GN) |
+| CN6, CN7 | DATA2, DATA3 | Data channel routing (DB126V-5.0-3P-GN) |
+
 ### Hardware Features
 
 #### INA237 Power Monitors (4× channels)
