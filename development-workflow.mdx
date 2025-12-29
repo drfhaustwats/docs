@@ -521,19 +521,19 @@ if __name__ == "__main__":
 ### Logic Analyzer Configuration
 
 **Recommended Channels:**
-1. **UART TX (C5→H2)** - AT commands
-2. **UART RX (H2→C5)** - AT responses
-3. **UART CTS/RTS** - Flow control
-4. **SPI CLK** - 80MHz frame clock
-5. **SPI MOSI** - Frame data
-6. **SPI CS** - Frame valid signal
+1. **UART TX (C5→WROOM)** - AT commands
+2. **UART RX (WROOM→C5)** - AT responses
+3. **SPI CLK** - 80MHz frame clock
+4. **SPI MOSI** - Frame data
+5. **SPI CS** - Frame valid signal
+6. **LED CH0 Output** - RMT channel 0
 7. **LED CH2 Output** - RMT channel 2
 8. **LED CH3 Output** - RMT channel 3
 
 **Trigger Configuration:**
 ```
 # AT Command Analysis
-Trigger: UART TX edge, decode: UART (5Mbaud, 8N1)
+Trigger: UART TX edge, decode: UART (921.6kbaud, 8N1)
 
 # Frame Data Analysis  
 Trigger: SPI CS falling edge, decode: SPI (80MHz, Mode 0)

@@ -1,0 +1,429 @@
+---
+title: "Power Board API"
+description: "Quick reference for Watts Power Board C API functions"
+---
+
+# Watts Power Board API Reference
+
+Quick reference for all public API functions in the `watts_power_board` component.
+
+For detailed usage guide, configuration examples, and integration patterns, see [Power Board Documentation](../power-board.mdx).
+
+## Initialization
+
+### watts_power_begin
+
+```c
+bool watts_power_begin(const watts_power_config_t *cfg,
+                       watts_probe_result_t *probe_out);
+```
+
+Initialize power board and probe for connected devices.
+
+**Parameters:**
+- `cfg` - Configuration struct, or NULL for defaults
+- `probe_out` - Receives device detection results
+
+**Returns:** `true` if power board present
+
+**Example:**
+```c
+watts_probe_result_t probe;
+if (watts_power_begin(NULL, &probe)) {
+    printf("Power board ready\n");
+}
+```
+
+---
+
+### watts_power_is_present
+
+```c
+bool watts_power_is_present(void);
+```
+
+Check if power board was successfully initialized.
+
+**Returns:** `true` if `watts_power_begin()` succeeded
+
+---
+
+## Power Monitoring
+
+### watts_power_read_channel
+
+```c
+bool watts_power_read_channel(int index,
+                              watts_channel_meas_t *out,
+                              bool super_display,
+                              bool read_alerts);
+```
+
+Read measurements from a single channel.
+
+**Parameters:**
+- `index` - Channel number (0-3)
+- `out` - Receives measurement data
+- `super_display` - Use high-resolution averaging mode
+- `read_alerts` - Read and decode INA237 alert register
+
+**Returns:** `true` if read successful
+
+**Example:**
+```c
+watts_channel_meas_t meas;
+if (watts_power_read_channel(0, &meas, false, false)) {
+    printf("CH0: %d mA, %d mV\n", meas.current_mA, meas.voltage_mV);
+}
+```
+
+---
+
+### watts_power_read_all
+
+```c
+bool watts_power_read_all(watts_all_meas_t *out,
+                          bool super_display,
+                          bool read_alerts);
+```
+
+Read measurements from all 4 channels.
+
+**Parameters:**
+- `out` - Receives all channel measurements
+- `super_display` - Use high-resolution mode
+- `read_alerts` - Read alert registers
+
+**Returns:** `true` if all reads successful
+
+**Example:**
+```c
+watts_all_meas_t all;
+if (watts_power_read_all(&all, false, false)) {
+    for (int ch = 0; ch < 4; ch++) {
+        printf("CH%d: %d mA\n", ch, all.ch[ch].current_mA);
+    }
+}
+```
+
+---
+
+### watts_power_get_snapshot
+
+```c
+bool watts_power_get_snapshot(watts_power_snapshot_t *out);
+```
+
+Get cached measurements from monitor task (fastest, no I2C transaction).
+
+**Parameters:**
+- `out` - Receives cached snapshot
+
+**Returns:** `true` if snapshot valid
+
+**Example:**
+```c
+watts_power_snapshot_t snap;
+if (watts_power_get_snapshot(&snap) && snap.valid) {
+    // Use snap.meas.ch[0-3] for measurements
+    // Use snap.oc_mask for overcurrent status
+}
+```
+
+---
+
+## Overcurrent Control
+
+### watts_power_request_manual_clear
+
+```c
+void watts_power_request_manual_clear(uint8_t mask);
+```
+
+Manually trigger overcurrent clear on specific channels.
+
+**Parameters:**
+- `mask` - Channel bitmask (bit 0-3 for channels 0-3)
+
+**Example:**
+```c
+watts_power_request_manual_clear(0x05);  // Clear channels 0 and 2
+```
+
+---
+
+### watts_power_get_overcurrent_mask
+
+```c
+uint8_t watts_power_get_overcurrent_mask(void);
+```
+
+Get current latched overcurrent state.
+
+**Returns:** Bitmask of latched overcurrent channels (bit 0-3)
+
+**Example:**
+```c
+uint8_t mask = watts_power_get_overcurrent_mask();
+if (mask & 0x01) {
+    printf("Channel 0 has overcurrent\n");
+}
+```
+
+---
+
+## Expander Control
+
+### watts_tca9555_write_reg
+
+```c
+bool watts_tca9555_write_reg(uint8_t reg, uint8_t value);
+```
+
+Write to TCA9555 power board expander register.
+
+**Parameters:**
+- `reg` - Register address (0x00-0x07)
+- `value` - Byte to write
+
+**Returns:** `true` if write successful
+
+---
+
+### watts_tca9555_read_reg
+
+```c
+bool watts_tca9555_read_reg(uint8_t reg, uint8_t *value);
+```
+
+Read from TCA9555 power board expander register.
+
+**Parameters:**
+- `reg` - Register address
+- `value` - Receives read byte
+
+**Returns:** `true` if read successful
+
+---
+
+### watts_power_reset_w5500
+
+```c
+bool watts_power_reset_w5500(void);
+```
+
+Pulse W5500 ethernet controller reset line.
+
+**Returns:** `true` if reset sequence completed
+
+**Timing:** 10ms LOW, 100ms HIGH delay
+
+**Example:**
+```c
+watts_power_reset_w5500();
+W5500ETH.begin(/* SPI params */);
+```
+
+---
+
+## STM32 Slave Control
+
+### watts_stm_enable_outputs / watts_stm_disable_outputs
+
+```c
+bool watts_stm_enable_outputs(void);
+bool watts_stm_disable_outputs(void);
+```
+
+Enable or disable all LED outputs globally.
+
+**Returns:** `true` if command successful
+
+---
+
+### watts_stm_enable_all / watts_stm_disable_all
+
+```c
+bool watts_stm_enable_all(void);
+bool watts_stm_disable_all(void);
+```
+
+Convenience functions combining enable/disable with reset.
+
+**Returns:** `true` if command successful
+
+---
+
+### watts_stm_enable_channel / watts_stm_disable_channel
+
+```c
+bool watts_stm_enable_channel(uint8_t channel);   // channel: 0-3
+bool watts_stm_disable_channel(uint8_t channel);
+```
+
+Enable or disable individual LED channels.
+
+**Returns:** `true` if command successful
+
+**Example:**
+```c
+watts_stm_enable_channel(0);   // Enable channel 0
+watts_stm_disable_channel(1);  // Disable channel 1
+```
+
+---
+
+### watts_stm_reset_a3942
+
+```c
+bool watts_stm_reset_a3942(void);
+```
+
+Reset A3942 motor driver chip.
+
+**Returns:** `true` if reset successful
+
+---
+
+### watts_stm_clear_fault_flags
+
+```c
+bool watts_stm_clear_fault_flags(void);
+```
+
+Clear latched fault flags in A3942.
+
+**Returns:** `true` if clear successful
+
+---
+
+### watts_stm_read_status
+
+```c
+bool watts_stm_read_status(uint8_t *status);
+```
+
+Read STM32 global status register.
+
+**Parameters:**
+- `status` - Receives status byte
+
+**Returns:** `true` if read successful
+
+**Example:**
+```c
+uint8_t status;
+if (watts_stm_read_status(&status)) {
+    if (status & 0x01) printf("Outputs enabled\n");
+}
+```
+
+---
+
+### watts_stm_read_fault
+
+```c
+bool watts_stm_read_fault(uint8_t channel, uint8_t *fault);
+```
+
+Read A3942 fault register for specific channel.
+
+**Parameters:**
+- `channel` - Channel number (0-3)
+- `fault` - Receives fault byte
+
+**Returns:** `true` if read successful
+
+**Fault Bits:**
+- `0x80` - [OL] Open Load
+- `0x40` - [STG] Short to Ground
+- `0x20` - [STB] Short to Battery
+- `0x10` - [OT] Overtemperature
+
+**Example:**
+```c
+uint8_t fault;
+if (watts_stm_read_fault(2, &fault)) {
+    if (fault & 0x80) printf("CH2: Open Load\n");
+    if (fault & 0x40) printf("CH2: Short to Ground\n");
+}
+```
+
+---
+
+## Data Structures
+
+### watts_power_config_t
+
+```c
+typedef struct {
+    bool init_wire;                    // Initialize Wire library
+    int sda_pin;                       // I2C SDA pin
+    int scl_pin;                       // I2C SCL pin
+    uint32_t freq_hz;                  // I2C frequency
+    int int_gpio;                      // Main expander INT pin
+    bool auto_start_monitor;           // Start monitor task
+    uint32_t monitor_period_ms;        // Monitor polling interval
+    unsigned monitor_priority;         // FreeRTOS task priority
+    uint32_t stack_words;              // Task stack size
+    uint32_t oc_first_clear_delay_ms;  // OC first clear delay
+    uint32_t oc_retry_interval_ms;     // OC retry interval
+    uint8_t oc_max_attempts;           // OC max attempts
+} watts_power_config_t;
+```
+
+**Defaults:**
+- `sda_pin` = 7, `scl_pin` = 9, `freq_hz` = 100000
+- `auto_start_monitor` = true, `monitor_period_ms` = 50
+- `oc_first_clear_delay_ms` = 5000, `oc_retry_interval_ms` = 60000
+- `oc_max_attempts` = 10
+
+---
+
+### watts_probe_result_t
+
+```c
+typedef struct {
+    bool expander_ok;     // TCA9555 detected
+    bool ina_ok[4];       // INA237 sensors detected
+    bool stm_ok;          // STM32 slave detected
+    bool all_required_ok; // Expander + at least 1 INA
+} watts_probe_result_t;
+```
+
+---
+
+### watts_channel_meas_t
+
+```c
+typedef struct {
+    int32_t current_mA;   // Current in milliamps
+    int32_t voltage_mV;   // Voltage in millivolts
+    int32_t power_mW;     // Power in milliwatts
+    int32_t temp_C;       // Temperature in Celsius
+    uint16_t alerts_raw;  // Raw alert register
+    bool overcurrent;     // Overcurrent flag
+    bool temp_alert;      // Temperature alert flag
+} watts_channel_meas_t;
+```
+
+---
+
+### watts_power_snapshot_t
+
+```c
+typedef struct {
+    bool valid;                    // Data is valid
+    uint32_t last_update_ms;       // Timestamp of last update
+    watts_all_meas_t meas;         // All 4 channel measurements
+    uint8_t oc_mask;               // Latched OC bits (bit 0-3)
+} watts_power_snapshot_t;
+```
+
+---
+
+## See Also
+
+- [Power Board Guide](../power-board.mdx) - Complete documentation with examples
+- [Hardware & Pinouts](../hardware.mdx#watts-power-board) - I2C topology and wiring
+- [WLED Integration](../power-board.mdx#wled-integration-led-detection) - LED auto-detection

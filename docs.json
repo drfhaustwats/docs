@@ -75,6 +75,12 @@
             ]
           },
           {
+            "group": "Power Board",
+            "pages": [
+              "api-reference/power-board-api"
+            ]
+          },
+          {
             "group": "Endpoint examples",
             "pages": [
               "api-reference/endpoint/get",

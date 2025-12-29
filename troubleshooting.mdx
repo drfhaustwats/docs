@@ -18,34 +18,33 @@ This guide provides specific code locations, debugging procedures, and diagnosti
 
 **Check These Code Locations:**
 
-1. **ESP32-C5 ATHost Configuration** (`esp32-c5-main/ATHost.cpp`):
+1. **ESP32-C5 ATHost Configuration** (`components/athost/src/ATHost.cpp`):
    ```cpp
-   // Line ~45: UART initialization
+   // UART initialization
+   #define HOST_UART_BAUD 921600
+
    void ATHost_init() {
-       uart_config_t uart_config = {
-           .baud_rate = 5000000,           // Verify baud rate match
-           .flow_ctrl = UART_HW_FLOWCTRL_CTS_RTS,  // Check flow control
-       };
+       hostSer.begin(HOST_UART_BAUD, SERIAL_8N1, PINS.uart.rx, PINS.uart.tx);
    }
    ```
 
-2. **ESP32-H2 CAT Parser Setup** (`esp32-h2-at/main/EspAt_firmware.c`):
+2. **ESP32 WROOM CAT Parser Setup** (`main/EspAt_firmware.c`):
    ```cpp
-   // Line ~82: UART configuration must match C5
-   uart_config_t uart_config = {
-       .baud_rate = 5000000,               // Must match ATHost
-       .flow_ctrl = UART_HW_FLOWCTRL_CTS_RTS,
-       .rx_flow_ctrl_thresh = 122,         // Check threshold
+   // UART configuration must match C5
+   const uart_config_t uart_config = {
+       .baud_rate = 921600,                    // Must match ATHost
+       .data_bits = UART_DATA_8_BITS,
+       .parity = UART_PARITY_DISABLE,
+       .stop_bits = UART_STOP_BITS_1,
+       .flow_ctrl = UART_HW_FLOWCTRL_DISABLE,  // Flow control disabled
    };
    ```
 
 **Debugging Steps:**
 ```bash
-# Check H2 UART pins in hardware.mdx
-GPIO 4  -> UART TX (to C5 RX)
-GPIO 5  -> UART RX (from C5 TX) 
-GPIO 6  -> UART RTS
-GPIO 7  -> UART CTS
+# Check WROOM UART pins in hardware.mdx
+GPIO 2  -> UART TX (to C5 RX GPIO1)
+GPIO 3  -> UART RX (from C5 TX GPIO6)
 
 # Test basic connectivity
 echo "AT" > /dev/ttyUSB1  # Should return "OK"

@@ -31,10 +31,8 @@ The ESP32-C5 serves as the primary controller, handling Wi-Fi connectivity, WLED
 #### UART Communication (AT Host)
 | GPIO | Function | Description |
 |------|----------|-------------|
-| 1 | UART RX | Receives AT responses from H2 |
-| 6 | UART TX | Sends AT commands to H2 |
-| 7 | UART RTS | Hardware flow control output |
-| 8 | UART CTS | Hardware flow control input |
+| 1 | UART RX | Receives AT responses from WROOM |
+| 6 | UART TX | Sends AT commands to WROOM |
 
 #### System & Debug
 | GPIO | Function | Description |
@@ -96,13 +94,12 @@ The ESP32 WROOM functions as a dedicated LED processor and BLE interface, handli
 |------|----------|-------------|
 | 2 | UART TX | Sends AT responses to C5 |
 | 3 | UART RX | Receives AT commands from C5 |
-| 4 | UART RTS | Hardware flow control output |
-| 5 | UART CTS | Hardware flow control input |
 
 **UART Specifications:**
-- **Baud Rate**: 5 Mbaud (5,000,000 bps)
-- **Flow Control**: Hardware CTS/RTS enabled
-- **Port**: UART_NUM_1
+- **Baud Rate**: 921.6 kbaud (921,600 bps)
+- **Flow Control**: Disabled
+- **Format**: 8N1 (8 data bits, no parity, 1 stop bit)
+- **Port**: UART_NUM_0
 
 #### Data Reception (SPI Slave Mode)
 | GPIO | Function | Description |
@@ -141,8 +138,6 @@ GPIO 25 (ParlIO VALID)────► GPIO 25 (SPI CS)
 
 GPIO 6  (UART TX)     ────► GPIO 3  (UART RX)
 GPIO 1  (UART RX)     ◄──── GPIO 2  (UART TX)
-GPIO 7  (UART RTS)    ────► GPIO 5  (UART CTS)
-GPIO 8  (UART CTS)    ◄──── GPIO 4  (UART RTS)
 
 GND                   ────── GND
 3.3V                  ────── 3.3V
@@ -159,8 +154,9 @@ GND                   ────── GND
 
 #### Control & Status
 - **Protocol**: UART with AT commands
-- **Baud Rate**: 5 Mbaud
-- **Flow Control**: Hardware CTS/RTS
+- **Baud Rate**: 921.6 kbaud
+- **Flow Control**: Disabled
+- **Format**: 8N1
 - **Direction**: Bidirectional
 - **Use Cases**: Configuration sync, firmware updates, status reporting
 

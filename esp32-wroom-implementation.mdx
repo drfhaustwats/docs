@@ -80,12 +80,11 @@ void app_main(void) {
     
     // 2. Configure UART for AT communication
     uart_config_t uart_config = {
-        .baud_rate = 5000000,                    // 5 Mbaud
+        .baud_rate = 921600,                     // 921.6 kbaud
         .data_bits = UART_DATA_8_BITS,
         .parity = UART_PARITY_DISABLE,
         .stop_bits = UART_STOP_BITS_1,
-        .flow_ctrl = UART_HW_FLOWCTRL_CTS_RTS,   // Hardware flow control
-        .rx_flow_ctrl_thresh = 122,
+        .flow_ctrl = UART_HW_FLOWCTRL_DISABLE,   // No flow control
     };
     
     // 3. Register all AT commands

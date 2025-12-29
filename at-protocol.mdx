@@ -10,10 +10,10 @@ The AT Command Protocol serves as the primary communication mechanism between th
 ## Protocol Architecture
 
 ### Communication Channel
-- **Physical Layer**: UART (5 Mbaud, 8N1)
-- **Flow Control**: Hardware CTS/RTS enabled
+- **Physical Layer**: UART (921.6 kbaud, 8N1)
+- **Flow Control**: Disabled
 - **Direction**: Bidirectional with master-slave relationship
-- **Framework**: Tiny-CAT AT command parser on ESP32-H2
+- **Framework**: Tiny-CAT AT command parser on ESP32 WROOM
 
 ### Message Types
 
@@ -145,7 +145,7 @@ System maintenance and updates:
 ### Reliability Features
 - **CRC Protection**: Frame data integrity
 - **Acknowledgment**: Positive confirmation required
-- **Flow Control**: Hardware-level congestion management
+- **Software Buffering**: Queue-based command management
 - **Automatic Retry**: Built-in error recovery
 
 ## Integration Points

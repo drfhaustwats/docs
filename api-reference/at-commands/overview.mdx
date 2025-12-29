@@ -63,7 +63,7 @@ URCs are asynchronous messages sent by the ESP32 WROOM to notify the ESP32-C5 of
 
 ## Communication Protocol
 
-- **UART Settings**: 5 Mbaud, 8N1, Hardware flow control
+- **UART Settings**: 921.6 kbaud, 8N1, No flow control
 - **Timeout**: Variable by command type (100ms - 30s)
 - **Direction**: ESP32-C5 (master) → ESP32 WROOM (slave)
 - **Framework**: Tiny-CAT AT parser on ESP32 WROOM
