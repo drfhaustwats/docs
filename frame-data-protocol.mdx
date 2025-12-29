@@ -1,6 +1,6 @@
 ---
 title: "Frame Data Protocol"
-description: "Deep dive into the 80MHz ParlIO→SPI frame protocol, 4-channel data formats, and NeoPixelBus LED control"
+description: "Deep dive into the 30MHz ParlIO→SPI frame protocol, 4-channel data formats, and NeoPixelBus LED control"
 ---
 
 # Frame Data Protocol
@@ -14,7 +14,7 @@ The frame protocol operates in three distinct phases:
 ```
 Phase 1: Preparation    Phase 2: Data Transfer    Phase 3: Acknowledgment
 ESP32-C5 → WROOM        ESP32-C5 → WROOM          WROOM → ESP32-C5
-  AT+LED_PREP            80MHz ParlIO Stream         +LED_DONE URC
+  AT+LED_PREP            30MHz ParlIO Stream         +LED_DONE URC
   (UART 921.6kbaud)      (All 4 channels data)      (Status report)
      ~1ms                     ~800µs                    ~10µs
 ```
@@ -80,7 +80,7 @@ struct pixel_data {
 
 This format matches the native WS2812 bit order, eliminating the need for color reordering during NeoPixelBus RMT transmission.
 
-## 80MHz ParlIO → SPI Data Transfer
+## 30MHz ParlIO → SPI Data Transfer
 
 ### ParlIO TX Configuration (ESP32-C5)
 
@@ -88,8 +88,8 @@ The ESP32-C5 uses ParlIO (Parallel I/O) in serial mode for high-speed data trans
 
 ```cpp
 parlio_tx_unit_config_t config = {
-    .clk_src = PARLIO_CLK_SRC_DEFAULT,       // 80MHz APB clock source
-    .output_clk_freq_hz = 80000000,          // 80MHz output clock
+    .clk_src = PARLIO_CLK_SRC_DEFAULT,       // 30MHz APB clock source
+    .output_clk_freq_hz = 30000000,          // 30MHz output clock
     .sample_edge = PARLIO_SAMPLE_EDGE_POS,   // Positive edge sampling
     .bit_pack_order = PARLIO_BIT_PACK_ORDER_MSB, // MSB first
     .data_width = 1,                         // 1-bit serial transmission
@@ -102,7 +102,7 @@ parlio_tx_unit_config_t config = {
 **GPIO Assignments:**
 ```cpp
 parlio_tx_gpio_config_t gpio_config = {
-    .clk_out_pin = GPIO_NUM_10,    // 80MHz clock to ESP32 WROOM
+    .clk_out_pin = GPIO_NUM_10,    // 30MHz clock to ESP32 WROOM
     .valid_pin = GPIO_NUM_25,      // Frame valid signal (active high)
     .data_pins = {GPIO_NUM_26}     // Serial data (WLED 3rd LED output)
 };
@@ -111,8 +111,8 @@ parlio_tx_gpio_config_t gpio_config = {
 ### ParlIO Timing Characteristics
 
 **Clock Generation:**
-- **Source**: 80MHz APB clock (PLL-derived)
-- **Output**: 80MHz square wave with ~50% duty cycle
+- **Source**: 30MHz APB clock (PLL-derived)
+- **Output**: 30MHz square wave with ~50% duty cycle
 - **Jitter**: &lt;1ns RMS (crystal stability dependent)
 - **Edge Rate**: &lt;5ns rise/fall time
 
@@ -286,7 +286,7 @@ The ParlIO output is electrically compatible with SPI input, but requires carefu
 ```
 ParlIO (C5)           SPI Slave (WROOM)
 ─────────────         ──────────────────
-CLK_OUT (80MHz)   →   SCLK (80MHz)
+CLK_OUT (30MHz)   →   SCLK (30MHz)
 DATA (Serial)     →   MOSI (Serial)
 VALID (Frame)     →   CS (Active High)
 ```
@@ -329,11 +329,11 @@ Total WROOM LED memory: ~145KB
 
 **ParlIO Bandwidth:**
 ```
-Theoretical: 80 MHz × 1 bit = 80 Mbps = 10 MB/s
-Effective:   ~90% efficiency = 9 MB/s (protocol overhead)
+Theoretical: 30 MHz × 1 bit = 30 Mbps = 3.75 MB/s
+Effective:   ~90% efficiency = 3.38 MB/s (protocol overhead)
 Frame size:  16012 bytes maximum (4 channels × 1000 pixels)
-Frame time:  16012 ÷ 9,000,000 = 1.78ms maximum
-Typical:     800 pixels/ch = 12812 bytes = 1.42ms
+Frame time:  16012 ÷ 3,380,000 = 4.74ms maximum
+Typical:     800 pixels/ch = 12812 bytes = 3.79ms
 ```
 
 **System Bottlenecks:**
