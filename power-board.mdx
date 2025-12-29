@@ -533,7 +533,7 @@ The STM32 and ESP32-C5 have distinct responsibilities regardless of operating mo
 
 The STM32 reads configuration pins from the TCA9555 GPIO expander at boot to determine its operating mode.
 
-**Source:** [main.c:313-337](src/power%20super/Core/Src/main.c#L313-L337) - TCA9555_Init()
+**Source:** `TCA9555_Init()` in [main.c](src/power%20super/Core/Src/main.c)
 
 #### Configuration Switches
 
@@ -558,9 +558,9 @@ P0 = 0b00000101  →  5A mode, STANDALONE, keep-alive bypassed
 In PERIPHERAL mode, the STM32 acts as an I2C slave at address 0x50, responding to commands from the ESP32-C5. This is the standard configuration for the Watts v3 system.
 
 **Source Code:**
-- STM32 I2C slave: [main.c:759-822](src/power%20super/Core/Src/main.c#L759-L822) - I2C callbacks
-- STM32 command processing: [main.c:861-934](src/power%20super/Core/Src/main.c#L861-L934) - Process_Peripheral_Command()
-- ESP32 command sender: [watts_power_board.cpp:311-338](src/Watts-ESP-IDF-C5/components/watts_power_board/watts_power_board.cpp#L311-L338)
+- STM32 I2C slave: `HAL_I2C_AddrCallback()` and related callbacks in [main.c](src/power%20super/Core/Src/main.c)
+- STM32 command processing: `Process_Peripheral_Command()` in [main.c](src/power%20super/Core/Src/main.c)
+- ESP32 command sender: `watts_stm_send_command()` in [watts_power_board.cpp](src/Watts-ESP-IDF-C5/components/watts_power_board/watts_power_board.cpp)
 
 **Key Features:**
 - **I2C Command Interface**: 19 commands for output control, fault reading, and A3942 reset
@@ -568,7 +568,7 @@ In PERIPHERAL mode, the STM32 acts as an I2C slave at address 0x50, responding t
 - **Fault Caching**: Polls A3942 faults every 100ms for fast I2C reads
 - **Interrupt-Driven**: Minimal polling, instant command response
 
-**I2C Command Set (defined in [main.c:57-77](src/power%20super/Core/Src/main.c#L57-L77)):**
+**I2C Command Set (defined in [main.c](src/power%20super/Core/Src/main.c) - command defines):**
 
 | Command | Code | Description |
 |---------|------|-------------|
@@ -598,9 +598,9 @@ In PERIPHERAL mode, the STM32 acts as an I2C slave at address 0x50, responding t
 In STANDALONE mode, the STM32 operates independently without an external MCU. This mode is used for testing, development, or standalone LED control.
 
 **Source Code:**
-- Main loop: [main.c:1023-1070](src/power%20super/Core/Src/main.c#L1023-L1070) - STANDALONE mode loop
-- OC polling: [main.c:551-617](src/power%20super/Core/Src/main.c#L551-L617) - Poll_Overcurrent()
-- OC handling: [main.c:619-701](src/power%20super/Core/Src/main.c#L619-L701) - Handle_Overcurrent()
+- Main loop: `main()` STANDALONE branch in [main.c](src/power%20super/Core/Src/main.c)
+- OC polling: `Poll_Overcurrent()` in [main.c](src/power%20super/Core/Src/main.c)
+- OC handling: `Handle_Overcurrent()` in [main.c](src/power%20super/Core/Src/main.c)
 
 **Key Features:**
 - **Autonomous Monitoring**: Polls INA237 current sensors every 50ms
@@ -720,12 +720,12 @@ Both STANDALONE and PERIPHERAL modes implement automatic overcurrent recovery, b
 | Success threshold | 80% | 80% |
 
 **Source Code:**
-- STANDALONE: [main.c:141-145](src/power%20super/Core/Src/main.c#L141-L145) - STM32 timing defines
-- PERIPHERAL: [watts_power_board.h:24-28](src/Watts-ESP-IDF-C5/components/watts_power_board/include/watts_power_board.h#L24-L28) - ESP32 timing defines
+- STANDALONE: OC recovery defines in [main.c](src/power%20super/Core/Src/main.c)
+- PERIPHERAL: `WATTS_OC_*` defines in [watts_power_board.h](src/Watts-ESP-IDF-C5/components/watts_power_board/include/watts_power_board.h)
 
 **STM32 STANDALONE Recovery Parameters:**
 ```c
-// Source: main.c:141-145
+// Source: main.c - OC recovery defines
 #define OC_RETRY_INTERVAL_MS    60000   // Retry every 1 minute
 #define OC_MAX_ATTEMPTS         10      // Give up after 10 attempts
 #define OC_VERIFY_DURATION_MS   500     // Poll ALERT for 500ms after clear
@@ -735,7 +735,7 @@ Both STANDALONE and PERIPHERAL modes implement automatic overcurrent recovery, b
 
 **ESP32 PERIPHERAL Recovery Parameters:**
 ```c
-// Source: watts_power_board.h:24-28
+// Source: watts_power_board.h - WATTS_OC_* defines
 #define WATTS_OC_FIRST_CLEAR_DELAY_MS   5000   // Wait 5s before first clear
 #define WATTS_OC_RETRY_INTERVAL_MS      60000  // Retry every 60s
 #define WATTS_OC_MAX_ATTEMPTS           10     // Give up after 10 attempts
@@ -793,11 +793,11 @@ OC Detected → Attempt 1 (immediate)
 
 The STM32 configures all 4 INA237 power monitors with overcurrent thresholds based on the current mode setting (P0.0 hardware switch).
 
-**Source Code:** [main.c:343-383](src/power%20super/Core/Src/main.c#L343-L383) - INA237_Init_All()
+**Source Code:** `INA237_Init_All()` in [main.c](src/power%20super/Core/Src/main.c)
 
 **Configuration:**
 ```c
-// Source: main.c:347-350
+// Source: main.c - INA237_Init_All()
 // Overcurrent threshold based on P0.0 (current mode)
 uint16_t oc_threshold = (current_mode == MODE_8A) ? 16000 : 10000;
 
