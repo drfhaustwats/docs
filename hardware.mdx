@@ -312,38 +312,126 @@ STM32 programming interface:
 
 ### Automatic Overcurrent Protection
 
-The power board implements intelligent overcurrent detection and automatic clearing through a dual-expander architecture:
+The power board implements intelligent overcurrent detection and automatic clearing through a **dual-expander two-stage architecture**:
 
-**Hardware Detection Path:**
+#### Hardware Signal Chain (Active-Low Logic)
+
 ```
-INA237 Sensors (4×)
-  ↓ ALERT pins (active low)
-Power Board Expander (0x21)
-  - Port 1, bits 0-3 read ALERT status
-  ↓ POWER_INT output (active low)
-Main Board Expander (0x20)
-  - Port 1, bit 7 monitors POWER_INT
-  ↓ I2C polling (50ms)
-ESP32-C5 Firmware
+┌─────────────────────────────────────────────────────────────┐
+│ STAGE 1: INA237 ALERT Generation                            │
+└─────────────────────────────────────────────────────────────┘
+
+INA237 Sensors (I2C: 0x40, 0x44, 0x48, 0x4C)
+  │ Each monitors one LED channel current
+  │ ALERT pin asserts LOW when current > configured threshold
+  │
+  ├─[CH0 ALERT]─> Power Board Expander (0x21) P1.0 ─┐
+  ├─[CH1 ALERT]─> Power Board Expander (0x21) P1.1 ─┤
+  ├─[CH2 ALERT]─> Power Board Expander (0x21) P1.2 ─┼─> OR logic
+  └─[CH3 ALERT]─> Power Board Expander (0x21) P1.3 ─┘   aggregation
+                                                        │
+                                                        ↓
+┌─────────────────────────────────────────────────────────────┐
+│ STAGE 2: POWER_INT Aggregation Signal                       │
+└─────────────────────────────────────────────────────────────┘
+
+                           POWER_INT (open-drain output)
+                              │ Asserts LOW if ANY P1.0-P1.3 is LOW
+                              │ Remains HIGH if all alerts clear
+                              ↓
+                  Main Board Expander (0x20) P1.7 (input pin)
+                              │ Monitored by ESP32-C5
+                              ↓
+                         ESP32-C5 Firmware
 ```
 
-**Software Detection Flow:**
-1. **Poll Main Expander**: Read P1.7 to check POWER_INT status
-2. **If POWER_INT Active**: Read Power Board Expander P1.0-P1.3
-3. **Update OC Mask**: Set bits for any channels with active ALERT
-4. **Snapshot Update**: Thread-safe update of overcurrent mask
+#### Two-Stage Software Detection (50ms Polling)
 
-**Clearing Sequence:**
-1. Wait 5 seconds (configurable) after detection
-2. Read INA237 DIAG_ALERT register (clears software latch)
-3. Send STM32 clear command (clears A3942 hardware fault)
-4. Poll ALERT pin for 1 second to verify stability
-5. If failed, retry every 60 seconds (configurable) up to 10 attempts (configurable)
+**Stage 1 - Fast Pre-Filter:**
+```cpp
+// Read Main Board Expander (0x20) Port 1
+uint8_t p1_main = read_i2c(0x20, TCA_INPUT_P1);
 
-**Logging:**
-- All overcurrent events logged with ESP_LOG
-- Clear success/failure tracked
-- A3942 fault states decoded and displayed
+// Check bit 7 (POWER_INT aggregation signal)
+bool any_overcurrent = ((p1_main & 0x80) == 0);  // Active LOW
+if (!any_overcurrent) return;  // No faults, skip Stage 2
+```
+
+**Stage 2 - Channel Identification:**
+```cpp
+// POWER_INT is active, read which specific channels triggered it
+uint8_t p1_power = read_i2c(0x21, TCA_INPUT_P1);
+
+// Check bits 0-3 to identify faulted channels
+uint8_t oc_mask = 0;
+for (int ch = 0; ch < 4; ch++) {
+  if ((p1_power & (1 << ch)) == 0) {  // ALERT active LOW
+    oc_mask |= (1 << ch);  // Set bit for this channel
+  }
+}
+
+// Latch faults (OR operation - sticky until cleared)
+s_snapshot.oc_mask |= oc_mask;
+```
+
+**Key Design Features:**
+- **Two I2C reads only when needed**: Stage 1 filters out 99% of polls when no faults exist
+- **Software latching**: Once detected, fault bits remain set until explicitly cleared
+- **Dual verification**: Hardware ALERT pins AND software INA237 DIAG_ALERT register (0x0B bit 6)
+
+#### Automatic Clearing Sequence
+
+When `watts_power_clear_oc(channel_mask)` is called (automatically after 5s delay):
+
+**For each faulted channel:**
+
+1. **Clear INA237 Internal Latch** (3 retries):
+   ```cpp
+   uint16_t diag = read_i2c_16bit(ina_addr[ch], INA237_REG_DIAG_ALERT);
+   // Reading DIAG_ALERT clears the INA237's internal overcurrent latch
+   ```
+
+2. **Clear STM32C0 A3942 Fault** (5 retries):
+   ```cpp
+   watts_stm_send_command(0x11 + ch);  // Commands: 0x11, 0x12, 0x13, 0x14
+   // Clears motor driver fault flags (short, open load, thermal)
+   ```
+
+3. **Verify ALERT Pin Cleared** (500ms polling, 10ms interval):
+   ```cpp
+   for (50 polls over 500ms) {
+     uint8_t p1 = read_i2c(0x21, TCA_INPUT_P1);
+     bool alert_clear = ((p1 & (1 << ch)) != 0);  // HIGH = cleared
+     if (!alert_clear) {
+       // ALERT re-asserted, fault still present
+       break;
+     }
+   }
+   // Require 80% of polls HIGH to confirm stable clear
+   ```
+
+4. **Update Software Latch**:
+   ```cpp
+   if (verified_clear) {
+     s_snapshot.oc_mask &= ~(1 << ch);  // Clear bit for this channel
+   }
+   ```
+
+**Retry Logic:**
+- **Initial delay**: 5 seconds after first detection
+- **Retry interval**: 60 seconds between clear attempts
+- **Max attempts**: 10 retries before giving up
+- **All configurable** via `watts_power_board.h` macros
+
+#### Logging & Monitoring
+
+```
+E POWER_MON: !!! OVERCURRENT CH2 !!!
+I POWER_MON: CH2: Current=8234mA, Threshold=8000mA
+I POWER_MON: CH2: Attempting clear (attempt 1/10)
+I POWER_MON: CH2: ALERT verified clear (48/50 polls HIGH)
+I POWER_MON: Channel 2 overcurrent CLEARED
+```
 
 ### W5500 Ethernet Integration
 

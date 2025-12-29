@@ -221,45 +221,124 @@ This allows WLED to automatically configure NeoPixelBus instances based on measu
 
 ## Automatic Overcurrent Protection
 
-The monitor task provides intelligent overcurrent detection and automatic clearing without application intervention.
+The monitor task provides intelligent overcurrent detection and automatic clearing through a **dual-expander two-stage architecture**.
 
-### How It Works
+### Hardware Architecture
 
-1. **Detection** - Monitor task polls INA237 ALERT pin and DIAG_ALERT register every 50ms
-2. **Latching** - Overcurrent event sets bit in `oc_mask` (bit 0-3 for channels 0-3)
-3. **Delay** - Waits 5 seconds (configurable) before first clear attempt
-4. **Clearing** - 3-step clear sequence: read INA237 DIAG_ALERT, send STM32 clear command, poll ALERT pin for 1s
-5. **Retry** - If clear fails, retries every 60 seconds (configurable) up to 10 attempts (configurable)
-6. **Logging** - All events logged with ESP_LOG for debugging
+**Two-Stage Detection Chain (Active-Low Logic):**
 
-### Clear Sequence Details
+```
+┌─────────────────────────────────────────────────────────────┐
+│ STAGE 1: INA237 ALERT Generation                            │
+└─────────────────────────────────────────────────────────────┘
 
+INA237 Sensors (I2C: 0x40, 0x44, 0x48, 0x4C)
+  │ Each monitors one LED channel current
+  │ ALERT pin asserts LOW when current > configured threshold
+  │
+  ├─[CH0 ALERT]─> Power Board Expander (0x21) P1.0 ─┐
+  ├─[CH1 ALERT]─> Power Board Expander (0x21) P1.1 ─┤
+  ├─[CH2 ALERT]─> Power Board Expander (0x21) P1.2 ─┼─> OR logic
+  └─[CH3 ALERT]─> Power Board Expander (0x21) P1.3 ─┘   aggregation
+                                                        │
+                                                        ↓
+┌─────────────────────────────────────────────────────────────┐
+│ STAGE 2: POWER_INT Aggregation Signal                       │
+└─────────────────────────────────────────────────────────────┘
+
+                           POWER_INT (open-drain output)
+                              │ Asserts LOW if ANY P1.0-P1.3 is LOW
+                              │ Remains HIGH if all alerts clear
+                              ↓
+                  Main Board Expander (0x20) P1.7 (input pin)
+                              │ Monitored by ESP32-C5
+                              ↓
+                         ESP32-C5 Firmware
+```
+
+### Two-Stage Software Detection (50ms Polling)
+
+The firmware uses a two-stage I2C read approach for efficiency:
+
+**Stage 1 - Fast Pre-Filter (1 I2C transaction):**
 ```cpp
-// Step 1: Read INA237 DIAG_ALERT register (clears software latch)
-uint16_t diag_alert;
-read_ina237_reg(ch_addr, 0x0B, &diag_alert);
+// Read Main Board Expander (0x20) Port 1
+uint8_t p1_main = read_i2c(0x20, TCA_INPUT_P1);
 
-// Step 2: Send STM32 clear command (clears A3942 hardware fault)
-watts_stm_clear_fault_flags();
+// Check bit 7 (POWER_INT aggregation signal)
+bool any_overcurrent = ((p1_main & 0x80) == 0);  // Active LOW
+if (!any_overcurrent) return;  // No faults detected, done
+```
 
-// Step 3: Poll hardware ALERT pin for 1 second to verify stability
-int poll_success = 0;
-for (int i = 0; i < 20; i++) {  // 20 polls at 50ms = 1 second
-    vTaskDelay(pdMS_TO_TICKS(50));
+**Stage 2 - Channel Identification (Only if Stage 1 triggered):**
+```cpp
+// POWER_INT is active, read which specific channels triggered it
+uint8_t p1_power = read_i2c(0x21, TCA_INPUT_P1);
 
-    uint8_t alert_val;
-    read_expander_input_port(&alert_val);
-
-    if (!(alert_val & (1 << ch))) {
-        poll_success++;  // ALERT pin high = cleared
-    }
+// Check bits 0-3 to identify faulted channels
+uint8_t oc_mask = 0;
+for (int ch = 0; ch < 4; ch++) {
+  if ((p1_power & (1 << ch)) == 0) {  // ALERT active LOW
+    oc_mask |= (1 << ch);  // Set bit for this channel
+  }
 }
 
-if (poll_success == 20) {
-    ESP_LOGI("POWER_MON", "✓ Clear SUCCESS mask=0x%02X", (1 << ch));
-    oc_mask &= ~(1 << ch);  // Clear latched bit
+// Latch faults (OR operation - sticky until cleared)
+s_snapshot.oc_mask |= oc_mask;
+```
+
+**Key Efficiency Benefits:**
+- **99% of polls use only 1 I2C transaction** (Stage 1 returns no fault)
+- **Stage 2 only runs when overcurrent detected** (rare event)
+- **Software latching** ensures faults aren't missed between polls
+
+### Automatic Clearing Sequence
+
+When an overcurrent is detected, the system automatically attempts to clear it:
+
+**High-Level Flow:**
+1. **Detection** - Monitor task detects fault via two-stage polling (above)
+2. **Latching** - Fault bit set in `s_snapshot.oc_mask` (bit 0-3 for channels 0-3)
+3. **Delay** - Waits 5 seconds (configurable) before first clear attempt
+4. **Clearing** - 3-step hardware clear sequence (below)
+5. **Retry** - If clear fails, retries every 60 seconds up to 10 attempts
+6. **Logging** - All events logged with ESP_LOG for debugging
+
+**Detailed 3-Step Clear Sequence:**
+
+```cpp
+// Step 1: Read INA237 DIAG_ALERT register (clears INA237 internal latch)
+uint16_t diag_alert;
+read_ina237_reg(ina_addr[ch], INA237_REG_DIAG_ALERT, &diag_alert);
+// Bit 6 = overcurrent flag (reading register clears it)
+
+// Step 2: Send STM32C0 clear command (clears A3942 motor driver fault)
+watts_stm_send_command(0x11 + ch);  // Commands: 0x11, 0x12, 0x13, 0x14
+// Clears hardware faults: short circuit, open load, thermal shutdown
+
+// Step 3: Poll hardware ALERT pin for 500ms to verify stable clear
+int polls_ok = 0;
+int polls_total = 0;
+for (500ms at 10ms interval) {  // 50 polls total
+    uint8_t p1_power = read_i2c(0x21, TCA_INPUT_P1);
+    bool alert_clear = ((p1_power & (1 << ch)) != 0);  // HIGH = cleared
+
+    if (alert_clear) {
+        polls_ok++;
+    } else {
+        // ALERT re-asserted, fault still present
+        break;
+    }
+    polls_total++;
+}
+
+// Require 80% of polls to be HIGH to confirm stable clear
+int required = (polls_total * 4) / 5;
+if (polls_ok >= required && polls_total > 0) {
+    s_snapshot.oc_mask &= ~(1 << ch);  // Clear latched bit
+    ESP_LOGI("POWER_MON", "Channel %d overcurrent CLEARED", ch);
 } else {
-    ESP_LOGW("POWER_MON", "✗ Clear FAILED mask=0x%02X (will retry)", (1 << ch));
+    ESP_LOGW("POWER_MON", "CH%d: Clear FAILED (will retry)", ch);
 }
 ```
 
