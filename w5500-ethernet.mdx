@@ -1,0 +1,697 @@
+---
+title: "W5500 Ethernet Controller"
+description: "ESP32-C5 W5500 SPI Ethernet driver with automatic recovery and WiFi failover"
+---
+
+# W5500 Ethernet Controller
+
+The Watts v3 system includes a W5500 SPI-based Ethernet controller providing wired network connectivity with automatic failover to WiFi. The driver includes sophisticated recovery mechanisms for handling network issues and DHCP failures.
+
+## Source Code Reference
+
+| Component | File | Description |
+|-----------|------|-------------|
+| **W5500 Driver** | [esp32_w5500.h](src/Watts-ESP-IDF-C5/components/eth_w5500/include/esp32_w5500.h) | Main driver class definition |
+| **Driver Implementation** | [esp32_w5500.cpp](src/Watts-ESP-IDF-C5/components/eth_w5500/src/esp32_w5500.cpp) | Full driver implementation |
+| **Network Switcher** | [net_switcher.h](src/Watts-ESP-IDF-C5/components/eth_w5500/include/net_switcher.h) | ETH/WiFi failover API |
+| **Switcher Implementation** | [net_switcher.cpp](src/Watts-ESP-IDF-C5/components/eth_w5500/src/net_switcher.cpp) | Failover implementation |
+| **WLED Integration** | [wled.h:34-35](src/Watts-ESP-IDF-C5/components/wled/wled.h#L34-L35) | W5500 includes |
+| **Power Board Reset** | [watts_power_board.cpp:353-384](src/Watts-ESP-IDF-C5/components/watts_power_board/watts_power_board.cpp#L353-L384) | Hardware reset via TCA9555 |
+
+## Hardware Architecture
+
+### SPI Connection (ESP32-C5)
+
+The W5500 connects to the ESP32-C5 via the SPI2 bus:
+
+| Signal | GPIO | Function |
+|--------|------|----------|
+| MISO | 5 | SPI data in |
+| MOSI | 6 | SPI data out |
+| SCK | 4 | SPI clock (8-25 MHz) |
+| CS | 12 | Chip select |
+| INT | -1 | Interrupt (polling mode) |
+| RST | - | Via TCA9555 P1.6 |
+
+**Source:** [wled.h:329-332](src/Watts-ESP-IDF-C5/components/wled/wled.h#L329-L332) - GPIO definitions
+
+### Reset Control via Power Board
+
+The W5500 reset line is controlled by the TCA9555 I/O expander on the power board:
+
+```
+TCA9555 (0x21) Port 1, Bit 6 → W5500 RESET (active-low)
+```
+
+**Source:** [watts_power_board.cpp:90](src/Watts-ESP-IDF-C5/components/watts_power_board/watts_power_board.cpp#L90)
+
+```cpp
+// Power board expander bit for W5500 reset
+static constexpr uint8_t U2_P1_W5500_RST_BIT = (1 << 6);
+```
+
+## Driver Architecture
+
+### ESP32_W5500 Class
+
+The main driver class provides full Ethernet stack integration:
+
+**Source:** [esp32_w5500.h:35-133](src/Watts-ESP-IDF-C5/components/eth_w5500/include/esp32_w5500.h#L35-L133)
+
+```cpp
+class ESP32_W5500 {
+public:
+    // Initialization
+    bool begin(int MISO, int MOSI, int SCLK, int CS, int INT,
+               int SPICLOCK_MHZ = 25, int SPIHOST = SPI2_HOST,
+               uint8_t* W5500_Mac = W5500_Default_Mac,
+               const char* hostname = nullptr);
+    void end();
+
+    // Network status
+    bool linkUp();           // Physical link status
+    bool hasIp();            // DHCP lease acquired
+    IPAddress localIP();
+    IPAddress gatewayIP();
+    IPAddress subnetMask();
+
+    // Recovery support
+    bool checkRecoveryNeeded();    // Check for IP timeout
+    bool triggerRecovery();        // Full recovery sequence
+    uint8_t getRecoveryAttempts();
+    void resetRecoveryAttempts();
+
+    // Control
+    bool startDhcp();
+    bool stopDhcp();
+    bool start();
+    bool stop();
+};
+
+extern ESP32_W5500 W5500ETH;  // Global instance
+```
+
+### Connection Detection Macro
+
+WLED uses a macro to check any network connectivity:
+
+**Source:** [wled.h:1016-1018](src/Watts-ESP-IDF-C5/components/wled/wled.h#L1016-L1018)
+
+```cpp
+#define WLED_CONNECTED (WiFi.status() == WL_CONNECTED || \
+                        (ETH.linkUp() && ETH.localIP() != IPAddress(0,0,0,0)) || \
+                        (W5500ETH.linkUp() && W5500ETH.hasIp()))
+```
+
+## Initialization
+
+### Basic Initialization
+
+**Source:** [esp32_w5500.cpp:297-497](src/Watts-ESP-IDF-C5/components/eth_w5500/src/esp32_w5500.cpp#L297-L497)
+
+```cpp
+#include "esp32_w5500.h"
+#include "watts_power_board.h"
+#include "net_switcher.h"
+
+// 1. Initialize identity MAC (uses Wi-Fi MAC for consistency)
+uint8_t identity_mac[6];
+NetSwitcher_init_identity_mac(identity_mac);
+
+// 2. Reset W5500 hardware via power board
+if (watts_power_is_present()) {
+    watts_power_reset_w5500();
+}
+
+// 3. Initialize W5500 driver
+bool ok = W5500ETH.begin(
+    5,              // MISO
+    6,              // MOSI
+    4,              // SCLK
+    12,             // CS
+    -1,             // INT (polling mode)
+    8,              // SPI clock MHz
+    SPI2_HOST,      // SPI host
+    identity_mac,   // MAC address
+    "watts-controller"  // Hostname
+);
+
+if (ok) {
+    Serial.println("W5500 initialized, waiting for link...");
+}
+```
+
+### Initialization Sequence
+
+The `begin()` method performs these steps:
+
+1. **Event loop creation** - Creates default event loop if needed
+2. **GPIO ISR service** - Installs interrupt service
+3. **INT pin configuration** - Configures interrupt pin as input with pull-up
+4. **SPI bus initialization** - Initializes SPI2 with specified pins
+5. **W5500 MAC/PHY creation** - Creates MAC and PHY objects using ESP-IDF ethernet APIs
+6. **Driver installation** - Installs ethernet driver
+7. **MAC address configuration** - Sets provided MAC or derives from efuse
+8. **Event handler registration** - Registers for ETH and IP events
+9. **Netif creation** - Creates esp_netif for network stack integration
+10. **Glue attachment** - Attaches netif to ethernet driver
+11. **NetSwitcher registration** - Registers netif with failover system
+12. **Driver start** - Starts ethernet driver
+
+**Configuration Constants:**
+
+**Source:** [esp32_w5500.cpp:50-51](src/Watts-ESP-IDF-C5/components/eth_w5500/src/esp32_w5500.cpp#L50-L51)
+
+```cpp
+#define ETH_IP_TIMEOUT_MS           (3 * 60 * 1000)  // 3 minutes
+#define ETH_MAX_RECOVERY_ATTEMPTS   10
+```
+
+## Event Handling
+
+### Ethernet Events
+
+**Source:** [esp32_w5500.cpp:98-149](src/Watts-ESP-IDF-C5/components/eth_w5500/src/esp32_w5500.cpp#L98-L149)
+
+| Event | Action |
+|-------|--------|
+| `ETHERNET_EVENT_CONNECTED` | Set link up flag, start DHCP, begin IP timeout |
+| `ETHERNET_EVENT_DISCONNECTED` | Clear flags, switch to WiFi |
+| `ETHERNET_EVENT_START` | Log start |
+| `ETHERNET_EVENT_STOP` | Clear flags |
+
+**Link Up Handler:**
+
+```cpp
+case ETHERNET_EVENT_CONNECTED:
+    s_eth_link_up = true;
+    s_waiting_for_ip = true;
+    s_link_up_time = (uint32_t)(esp_timer_get_time() / 1000ULL);
+
+    ESP_LOGI("ESP32_W5500", "[ETH] Link up - waiting for IP (timeout %d s)",
+             ETH_IP_TIMEOUT_MS / 1000);
+
+    if (eth_netif) {
+        esp_netif_set_default_netif(eth_netif);
+        esp_netif_dhcpc_stop(eth_netif);
+        vTaskDelay(pdMS_TO_TICKS(100));
+        esp_netif_dhcpc_start(eth_netif);
+    }
+    break;
+```
+
+### IP Events
+
+**Source:** [esp32_w5500.cpp:153-187](src/Watts-ESP-IDF-C5/components/eth_w5500/src/esp32_w5500.cpp#L153-L187)
+
+| Event | Action |
+|-------|--------|
+| `IP_EVENT_ETH_GOT_IP` | Clear waiting flag, reset recovery counter, switch to ETH |
+| `IP_EVENT_ETH_LOST_IP` | Clear IP flag, set rebind flag |
+
+**Got IP Handler:**
+
+```cpp
+if (event_id == IP_EVENT_ETH_GOT_IP) {
+    auto* event = (ip_event_got_ip_t*) event_data;
+    s_eth_got_ip = true;
+    s_waiting_for_ip = false;      // Cancel timeout
+    s_recovery_attempts = 0;        // Reset on success
+
+    ESP_LOGI("ESP32_W5500", "[ETH] Got IP: " IPSTR, IP2STR(&event->ip_info.ip));
+
+    vTaskDelay(pdMS_TO_TICKS(500));
+    NetSwitcher_on_eth_got_ip();
+    NetSwitcher_switch_to_eth(s_eth_hostname);
+}
+```
+
+## Recovery System
+
+The W5500 driver includes automatic recovery for DHCP failures. If link is up but no IP is acquired within 3 minutes, recovery is triggered.
+
+### Recovery Detection
+
+**Source:** [esp32_w5500.cpp:1035-1056](src/Watts-ESP-IDF-C5/components/eth_w5500/src/esp32_w5500.cpp#L1035-L1056)
+
+```cpp
+bool ESP32_W5500::checkRecoveryNeeded(void)
+{
+    // Not waiting for IP? No recovery needed
+    if (!s_waiting_for_ip) return false;
+
+    // Already got IP? No recovery needed
+    if (s_eth_got_ip) return false;
+
+    // Link not up? No recovery needed
+    if (!s_eth_link_up) return false;
+
+    // Check elapsed time
+    uint32_t now = (uint32_t)(esp_timer_get_time() / 1000ULL);
+    uint32_t elapsed = now - s_link_up_time;
+
+    if (elapsed < ETH_IP_TIMEOUT_MS) {
+        return false;  // Not timed out yet
+    }
+
+    ESP_LOGW("ESP32_W5500", "[ETH] IP timeout after %lu ms", elapsed);
+    return true;
+}
+```
+
+### Recovery Sequence
+
+**Source:** [esp32_w5500.cpp:1058-1119](src/Watts-ESP-IDF-C5/components/eth_w5500/src/esp32_w5500.cpp#L1058-L1119)
+
+The recovery sequence performs:
+
+1. **Check retry limit** - Max 10 attempts before giving up
+2. **Hardware reset** - Reset W5500 via power board (if present)
+3. **Driver teardown** - Call `end()` to cleanup
+4. **Driver reinit** - Call `begin()` with saved configuration
+5. **Failover** - Switch to WiFi if recovery fails
+
+```cpp
+bool ESP32_W5500::triggerRecovery(void)
+{
+    if (s_recovery_attempts >= ETH_MAX_RECOVERY_ATTEMPTS) {
+        ESP_LOGE("ESP32_W5500", "[ETH] Max recovery attempts (%d) reached",
+                 ETH_MAX_RECOVERY_ATTEMPTS);
+        s_waiting_for_ip = false;
+        NetSwitcher_switch_to_wifi(s_eth_hostname);
+        return false;
+    }
+
+    s_recovery_attempts++;
+    ESP_LOGW("ESP32_W5500", "[ETH] Recovery attempt %d/%d",
+             s_recovery_attempts, ETH_MAX_RECOVERY_ATTEMPTS);
+
+    // Step 1: Hardware reset via power board
+    if (watts_power_is_present()) {
+        ESP_LOGI("ESP32_W5500", "[ETH] Resetting W5500 hardware...");
+        watts_power_reset_w5500();
+        vTaskDelay(pdMS_TO_TICKS(100));
+    }
+
+    // Step 2: Teardown driver
+    end();
+    vTaskDelay(pdMS_TO_TICKS(500));
+
+    // Step 3: Reinitialize with saved config
+    bool ok = begin(
+        s_eth_config.miso, s_eth_config.mosi,
+        s_eth_config.sclk, s_eth_config.cs,
+        s_eth_config.int_pin, s_eth_config.spi_clock_mhz,
+        s_eth_config.spi_host, s_eth_config.identity_mac,
+        s_eth_config.hostname[0] ? s_eth_config.hostname : nullptr
+    );
+
+    if (!ok) {
+        ESP_LOGE("ESP32_W5500", "[ETH] Recovery begin() FAILED");
+        NetSwitcher_switch_to_wifi(s_eth_hostname);
+    }
+
+    return ok;
+}
+```
+
+### Recovery Parameters
+
+| Parameter | Value | Description |
+|-----------|-------|-------------|
+| IP Timeout | 3 minutes | Time to wait for DHCP lease after link up |
+| Max Attempts | 10 | Maximum recovery attempts before giving up |
+| Post-Reset Delay | 100ms | Wait after hardware reset |
+| Post-End Delay | 500ms | Wait after driver teardown |
+
+## Network Switching (NetSwitcher)
+
+The NetSwitcher module manages automatic failover between Ethernet and WiFi.
+
+### API Reference
+
+**Source:** [net_switcher.h](src/Watts-ESP-IDF-C5/components/eth_w5500/include/net_switcher.h)
+
+```cpp
+// Registration
+void NetSwitcher_register_netifs(esp_netif_t* wifi_sta_netif, esp_netif_t* eth_netif);
+void NetSwitcher_clear_eth_netif(void);
+
+// Identity MAC (consistent across WiFi and ETH)
+void NetSwitcher_init_identity_mac(uint8_t out_mac[6]);
+const uint8_t* NetSwitcher_identity_mac(void);
+
+// Switching
+void NetSwitcher_switch_to_eth(const char* hostname);
+void NetSwitcher_switch_to_wifi(const char* hostname);
+
+// Status
+bool NetSwitcher_is_on_eth(void);
+void NetSwitcher_set_on_eth(bool on_eth);
+
+// Rebind flag (signals interfaces need reinitialization)
+bool NetSwitcher_rebind_needed(void);
+void NetSwitcher_clear_rebind_flag(void);
+void NetSwitcher_set_rebind_flag(void);
+
+// Callbacks
+typedef void (*NetSwitcher_PreSwitchCallback)(void);
+typedef void (*NetSwitcher_PostSwitchCallback)(void);
+void NetSwitcher_register_pre_switch_callback(NetSwitcher_PreSwitchCallback callback);
+void NetSwitcher_register_post_switch_callback(NetSwitcher_PostSwitchCallback callback);
+
+// IP event handlers
+void NetSwitcher_on_eth_got_ip(void);
+void NetSwitcher_on_wifi_got_ip(void);
+```
+
+### Switch to Ethernet
+
+**Source:** [net_switcher.cpp:256-291](src/Watts-ESP-IDF-C5/components/eth_w5500/src/net_switcher.cpp#L256-L291)
+
+When switching to Ethernet:
+
+1. Call pre-switch callback (disconnect MQTT, etc.)
+2. Stop WiFi DHCP client
+3. Disconnect WiFi
+4. Set ETH as default netif
+5. Push DNS servers to lwIP
+6. Set rebind flag for interface reinitialization
+
+```cpp
+void NetSwitcher_switch_to_eth(const char* hostname)
+{
+    if (!s_eth) {
+        ESP_LOGW(TAG, "ETH netif not registered; aborting switch");
+        return;
+    }
+
+    if (s_on_eth) {
+        // Already on ETH, just refresh DNS
+        netif_force_default_and_dns(s_eth, hostname);
+        return;
+    }
+
+    // Call pre-switch callback
+    if (s_pre_switch_callback) {
+        s_pre_switch_callback();
+        vTaskDelay(pdMS_TO_TICKS(100));
+    }
+
+    // Stop WiFi
+    if (s_wifi) {
+        esp_netif_dhcpc_stop(s_wifi);
+    }
+    esp_wifi_disconnect();
+
+    // Make ETH default
+    netif_force_default_and_dns(s_eth, hostname);
+
+    s_on_eth = true;
+    NetSwitcher_set_rebind_flag();
+
+    ESP_LOGI(TAG, "Switched to ETH");
+}
+```
+
+### Switch to WiFi
+
+**Source:** [net_switcher.cpp:293-335](src/Watts-ESP-IDF-C5/components/eth_w5500/src/net_switcher.cpp#L293-L335)
+
+When switching to WiFi (fallback):
+
+1. Call pre-switch callback
+2. Stop ETH DHCP client
+3. Initialize WiFi if needed
+4. Set identity MAC on WiFi interface
+5. Start WiFi
+6. Set WiFi as default netif
+7. Push DNS servers to lwIP
+
+### DNS Handling
+
+**Source:** [net_switcher.cpp:45-181](src/Watts-ESP-IDF-C5/components/eth_w5500/src/net_switcher.cpp#L45-L181)
+
+The NetSwitcher properly propagates DNS servers to lwIP:
+
+1. Read DNS info from esp-netif (DHCP provided)
+2. Validate DNS addresses (reject 0.0.0.0)
+3. If no valid DNS, use gateway IP as DNS (most routers forward DNS)
+4. Fallback to Google DNS (8.8.8.8, 8.8.4.4)
+5. Clear DNS cache after setting new servers
+
+```cpp
+// DNS validation and fallback
+if (!dns0_valid && !dns1_valid) {
+    // No valid DNS from DHCP - use router IP as DNS
+    esp_netif_ip_info_t ip_info;
+    if (esp_netif_get_ip_info(netif, &ip_info) == ESP_OK && ip_info.gw.addr != 0) {
+        ip_addr_t gateway_dns;
+        IP_ADDR4(&gateway_dns, ...);
+        dns_setserver(0, &gateway_dns);
+    } else {
+        // Last resort: Google DNS
+        ip_addr_t google_dns;
+        IP_ADDR4(&google_dns, 8, 8, 8, 8);
+        dns_setserver(0, &google_dns);
+    }
+}
+```
+
+## Power Board Integration
+
+### W5500 Reset Function
+
+**Source:** [watts_power_board.cpp:353-384](src/Watts-ESP-IDF-C5/components/watts_power_board/watts_power_board.cpp#L353-L384)
+
+```cpp
+bool watts_power_reset_w5500(void)
+{
+    if (!s_power_board_present) {
+        ESP_LOGW("power_reset", "Power board not present");
+        return false;
+    }
+
+    uint8_t out_p1 = 0;
+    wire_read8(WATTS_EXPANDER_ADDR, TCA_OUTPUT_P1, &out_p1);
+
+    // Pull RST low (10ms)
+    out_p1 &= (uint8_t)~U2_P1_W5500_RST_BIT;
+    wire_write8(WATTS_EXPANDER_ADDR, TCA_OUTPUT_P1, out_p1);
+    vTaskDelay(pdMS_TO_TICKS(10));
+
+    // Release RST high
+    out_p1 |= U2_P1_W5500_RST_BIT;
+    wire_write8(WATTS_EXPANDER_ADDR, TCA_OUTPUT_P1, out_p1);
+    vTaskDelay(pdMS_TO_TICKS(50));
+
+    ESP_LOGI("power_reset", "W5500 reset complete");
+    return true;
+}
+```
+
+**Reset Timing:**
+
+| Phase | Duration | Description |
+|-------|----------|-------------|
+| RST LOW | 10ms | Assert reset |
+| RST HIGH | 50ms | W5500 boot time |
+
+### Expander Configuration
+
+**Source:** [watts_power_board.cpp:344-351](src/Watts-ESP-IDF-C5/components/watts_power_board/watts_power_board.cpp#L344-L351)
+
+During power board initialization, the W5500 reset pin is configured:
+
+```cpp
+static void setup_expander_gpio(void)
+{
+    // Port 0: All inputs
+    wire_raw_write8(WATTS_EXPANDER_ADDR, TCA_CONFIG_P0, 0xFF);
+
+    // Port 1: P1.6 = output (W5500 RST), others = inputs
+    uint8_t cfg_p1 = 0xFF;
+    cfg_p1 &= (uint8_t)~U2_P1_W5500_RST_BIT;  // P1.6 = output
+    wire_raw_write8(WATTS_EXPANDER_ADDR, TCA_CONFIG_P1, cfg_p1);
+
+    // Set W5500 RST high (not reset)
+    wire_raw_write8(WATTS_EXPANDER_ADDR, TCA_OUTPUT_P1, U2_P1_W5500_RST_BIT);
+}
+```
+
+## WLED Integration
+
+### Ethernet Initialization in WLED
+
+The W5500 is initialized during WLED startup if the power board is present:
+
+```cpp
+// File: wled.cpp
+#include "esp32_w5500.h"
+#include "net_switcher.h"
+#include "watts_power_board.h"
+
+void WLED::initEthernet()
+{
+    if (!watts_power_is_present()) {
+        Serial.println("No power board - skipping Ethernet");
+        return;
+    }
+
+    // Reset W5500 hardware
+    watts_power_reset_w5500();
+
+    // Get identity MAC (same for WiFi and ETH)
+    uint8_t identity_mac[6];
+    NetSwitcher_init_identity_mac(identity_mac);
+
+    // Initialize W5500
+    if (W5500ETH.begin(MISO, MOSI, SCK, 12, -1, 8, SPI2_HOST,
+                       identity_mac, serverDescription)) {
+        Serial.println("Ethernet initialized");
+    }
+}
+```
+
+### Periodic Recovery Check
+
+In the main loop, periodically check if recovery is needed:
+
+```cpp
+void WLED::loop()
+{
+    // Check for ETH recovery every 10 seconds
+    static uint32_t lastRecoveryCheck = 0;
+    if (millis() - lastRecoveryCheck > 10000) {
+        lastRecoveryCheck = millis();
+
+        if (W5500ETH.checkRecoveryNeeded()) {
+            Serial.println("ETH recovery needed - triggering...");
+            W5500ETH.triggerRecovery();
+        }
+    }
+
+    // ... rest of loop
+}
+```
+
+## SPI Configuration
+
+### Clock Speed
+
+**Source:** [esp32_w5500.cpp:369-372](src/Watts-ESP-IDF-C5/components/eth_w5500/src/esp32_w5500.cpp#L369-L372)
+
+The W5500 supports SPI clock speeds of 8-25 MHz:
+
+```cpp
+if (SPICLOCK_MHZ < 8 || SPICLOCK_MHZ > 25) {
+    ESP_LOGE("ESP32_W5500", "SPI clock must be 8..25 MHz for W5500");
+    return false;
+}
+```
+
+### Polling Mode
+
+The driver uses polling mode (INT=-1) rather than hardware interrupts:
+
+**Source:** [esp32_w5500.cpp:384-385](src/Watts-ESP-IDF-C5/components/eth_w5500/src/esp32_w5500.cpp#L384-L385)
+
+```cpp
+eth_w5500_config_t w5500_cfg = ETH_W5500_DEFAULT_CONFIG(...);
+w5500_cfg.int_gpio_num = -1;          // disable hardware interrupt
+w5500_cfg.poll_period_ms = 2;         // poll every 2ms
+```
+
+## Troubleshooting
+
+### No Link Up
+
+**Symptom:** `W5500ETH.linkUp()` always returns false
+
+**Check:**
+1. SPI wiring - MISO=5, MOSI=6, SCK=4, CS=12
+2. SPI clock speed - Try 8 MHz instead of 25 MHz
+3. Power board presence - Reset requires power board
+4. Cable connection - Check Ethernet cable and switch port
+
+### Link Up But No IP
+
+**Symptom:** Link up but `W5500ETH.hasIp()` remains false
+
+**Check:**
+1. DHCP server - Verify DHCP server on network
+2. Recovery attempts - Check `W5500ETH.getRecoveryAttempts()`
+3. DNS propagation - Check if NetSwitcher is pushing DNS correctly
+4. Timeout - Wait for 3-minute timeout and recovery
+
+### Recovery Keeps Failing
+
+**Symptom:** Max recovery attempts reached
+
+**Check:**
+1. Network infrastructure - DHCP server may be down
+2. Power board reset - Verify `watts_power_reset_w5500()` succeeds
+3. SPI bus - May need to lower clock speed
+4. Manual intervention - Try calling `W5500ETH.resetRecoveryAttempts()` after fixing issue
+
+### WiFi Fallback Not Working
+
+**Symptom:** NetSwitcher fails to switch to WiFi
+
+**Check:**
+1. WiFi credentials - Verify SSID and password in settings
+2. Pre-switch callback - May be blocking
+3. WiFi hardware - Check WiFi antenna connection
+4. Rebind flag - Verify `NetSwitcher_rebind_needed()` is being checked
+
+## Expected Log Output
+
+### Successful Initialization
+
+```
+[ESP32_W5500] begin() start
+[ESP32_W5500] Creating W5500 MAC/PHY
+[ESP32_W5500] Installing Ethernet driver
+[ESP32_W5500] Ethernet driver installed
+[ESP32_W5500] Initializing esp_netif
+[ESP32_W5500] Starting Ethernet driver
+[ESP32_W5500] begin() end
+[ESP32_W5500] [ETH] Started
+```
+
+### Link Up and DHCP
+
+```
+[ESP32_W5500] [ETH] Link up - waiting for IP (timeout 180 s)
+[ESP32_W5500] [ETH] DHCP start -> ESP_OK
+[ESP32_W5500] [ETH] Got IP: 192.168.1.100
+[net_switcher] Switched to ETH (MAC: AA:BB:CC:DD:EE:FF)
+```
+
+### Recovery Sequence
+
+```
+[ESP32_W5500] [ETH] IP timeout after 180000 ms
+[ESP32_W5500] [ETH] Recovery attempt 1/10
+[ESP32_W5500] [ETH] Resetting W5500 hardware...
+[power_reset] W5500 reset complete
+[ESP32_W5500] end() starting teardown...
+[ESP32_W5500] ETH driver uninstalled
+[ESP32_W5500] end() complete
+[ESP32_W5500] begin() start
+...
+[ESP32_W5500] [ETH] Recovery begin() succeeded - waiting for IP again
+```
+
+### Failover to WiFi
+
+```
+[ESP32_W5500] [ETH] Max recovery attempts (10) reached - giving up
+[net_switcher] Switching from ETH to Wi-Fi...
+[net_switcher] Switched to Wi-Fi; waiting for STA IP
+```
+
+## See Also
+
+- [Power Board](power-board.mdx) - Power board integration and W5500 reset
+- [ESP32-C5 Implementation](esp32-c5-implementation.mdx) - Main controller documentation

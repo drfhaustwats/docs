@@ -19,6 +19,7 @@
               "index",
               "hardware",
               "power-board",
+              "w5500-ethernet",
               "arduino-setup",
               "at-protocol",
               "esp32-c5-implementation",
