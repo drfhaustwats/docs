@@ -200,9 +200,10 @@ Content-MD5: e5f6a7b8c9d0...
 - Cumulative MD5 calculation for full firmware
 
 **Special Handling for First Chunk:**
-- After sending first chunk, C5 waits for ACK from WROOM
-- Timeout: 5 seconds
-- Subsequent chunks are sent without waiting for ACK (streaming mode)
+- WROOM validates firmware header (version check, SHA-256)
+- After validation succeeds and `esp_ota_begin()` completes, WROOM sends ACK: `+OTAACK\r\n`
+- C5 waits for this ACK with 5-second timeout before continuing
+- Subsequent chunks are streamed without waiting for ACK (fire-and-forget mode)
 
 #### 5. Finalization
 
@@ -225,9 +226,31 @@ After all chunks transmitted:
 - Reboot Time: ~5 seconds
 - **Total Time: ~30 seconds**
 
+### WROOM-Side OTA Process
+
+The WROOM firmware ([ota.c](src/ESP32 Wroom LED Driver firmware/main/ota.c)) implements the receive side:
+
+1. **AT Command Handler**: Receives `AT+OTAUPDATE=<chunk_size>` and spawns OTA task
+2. **Sync Header Wait**: Expects 6-byte sync header `{0xC0, 0xFF, 0xFE, 0xAA, 0x55, 0x90}` within 5 seconds
+3. **Header Validation**: First chunk validates:
+   - Firmware version (must differ from running version)
+   - SHA-256 hash of incoming image
+   - Ensures version doesn't match last-invalid partition
+4. **ACK Transmission**: Sends `+OTAACK\r\n` after successful `esp_ota_begin()`
+5. **Streaming Reception**: Receives remaining chunks with 200ms read timeout per chunk
+6. **Completion**: After 3-second idle timeout, calls `esp_ota_end()` and reboots
+
+**WROOM Error Codes** (sent as `+OTAERR:<code>`):
+- `1` - SYNC_TIMEOUT: Sync header not received or mismatch
+- `2` - VERSION_ABORT: Version identical to running or last-invalid
+- `3` - UART: UART read/write error
+- `4` - FLASH_WRITE: `esp_ota_write()` failed
+- `5` - VALIDATE_FAILED: `esp_ota_end()` validation failed
+- `8` - UNKNOWN: Other errors (e.g., buffer allocation failure)
+
 ### Error Handling
 
-**Retry Logic:**
+**C5-Side Retry Logic:**
 - Maximum retries: 20 per chunk (configurable)
 - Retries triggered on:
   - HTTP error (non-200 response)
@@ -240,6 +263,7 @@ After all chunks transmitted:
 - UART write failure
 - First chunk ACK timeout (5 seconds)
 - Full firmware MD5 mismatch
+- WROOM sends `+OTAERR:` response
 
 ### Status Reporting
 

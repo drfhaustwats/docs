@@ -325,13 +325,16 @@ static const uint16_t LED_DETECT_MAX_LEDS = 1000;    // Maximum LEDs per channel
 
 ---
 
-## MQTT Integration
+## Remote Control Interfaces
 
-Detection can be triggered via MQTT command (implementation in WLED):
+### MQTT Integration
 
+Detection can be triggered via MQTT command:
+
+**Single Channel:**
 ```json
 {
-  "command": "detectLEDs",
+  "command": "detectLeds",
   "channel": 0
 }
 ```
@@ -339,8 +342,7 @@ Detection can be triggered via MQTT command (implementation in WLED):
 **All Channels:**
 ```json
 {
-  "command": "detectLEDs",
-  "channel": "all"
+  "command": "detectLeds"
 }
 ```
 
@@ -352,6 +354,52 @@ Detection can be triggered via MQTT command (implementation in WLED):
   "count": 150,
   "baseline_mA": 180,
   "delta_mA": 8
+}
+```
+
+### HTTP REST API
+
+The WLED web server provides a `/detectLeds` endpoint:
+
+**Single Channel:**
+```
+GET /detectLeds?ch=0
+```
+
+**Response:**
+```json
+{
+  "ch": 0,
+  "count": 150,
+  "type": 30,
+  "baseline": 180,
+  "delta": 8
+}
+```
+
+**All Channels:**
+```
+GET /detectLeds
+```
+
+**Response:**
+```json
+{
+  "tested": 4,
+  "results": [
+    {"ch": 0, "count": 150, "type": 30, "baseline": 180, "delta": 8},
+    {"ch": 1, "count": 200, "type": 22, "baseline": 150, "delta": 6},
+    {"ch": 2, "count": 100, "type": 30, "baseline": 120, "delta": 9},
+    {"ch": 3, "count": 0, "type": 30, "baseline": 50, "delta": 0}
+  ]
+}
+```
+
+**Error Response:**
+```json
+{
+  "ch": 0,
+  "error": "No measurable LED[0] delta (3 mA)"
 }
 ```
 
