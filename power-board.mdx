@@ -406,7 +406,11 @@ The power board includes an STM32C011F6 microcontroller that serves as an intell
 
 ### Operating Modes
 
-The STM32 reads configuration pins from the TCA9555 GPIO expander at boot to determine its operating mode:
+The STM32 reads configuration pins from the TCA9555 GPIO expander at boot to determine its operating mode.
+
+#### Configuration Switches
+
+Three hardware configuration switches on the power board control the STM32 firmware behavior. These switches connect to TCA9555 Port 0 inputs (P0.0, P0.1, P0.2) and are read at startup:
 
 | Config Pin | Function | Values |
 |------------|----------|--------|
