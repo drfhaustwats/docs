@@ -21,7 +21,7 @@ This chapter covers the complete development workflow for the Watts v3 dual-MCU 
 
 **Hardware Requirements:**
 - ESP32-C5 development board with USB-C connector
-- ESP32-H2 development board with USB-C connector  
+- ESP32 WROOM development board with USB-C connector
 - Logic analyzer (optional, for protocol debugging)
 - Oscilloscope (optional, for signal timing analysis)
 
@@ -145,7 +145,7 @@ idf.py build
 idf.py flash monitor
 ```
 
-### ESP32-H2 ESP-IDF Environment
+### ESP32 WROOM ESP-IDF Environment
 
 **Project Structure:**
 ```
@@ -579,7 +579,7 @@ import binascii
 from pathlib import Path
 
 class H2OTAUpdater:
-    def __init__(self, serial_port, baudrate=5000000):
+    def __init__(self, serial_port, baudrate=921600):
         self.serial = serial.Serial(serial_port, baudrate, timeout=30)
         self.sync_pattern = b'\xC0\xFF\xFE\xAA\x55\x90'
         
@@ -723,8 +723,8 @@ import json
 class ATCommandTests(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
-        cls.serial = serial.Serial('/dev/ttyUSB1', 5000000, timeout=2)
-        time.sleep(1)  # Allow H2 to initialize
+        cls.serial = serial.Serial('/dev/ttyUSB1', 921600, timeout=2)
+        time.sleep(1)  # Allow WROOM to initialize
         
     def test_basic_commands(self):
         """Test basic AT command functionality"""
@@ -747,15 +747,12 @@ class ATCommandTests(unittest.TestCase):
         
     def test_led_commands(self):
         """Test LED controller commands"""
-        # Prepare LED frame
-        self._send_command("AT+LED_PREP=100,200")
+        # Prepare LED frame (8 params: 4 pixel counts + 4 formats)
+        # Format: AT+LED_PREP=px0,px1,px2,px3,fmt0,fmt1,fmt2,fmt3
+        # Formats: 3=RGB, 4=RGBW
+        self._send_command("AT+LED_PREP=100,200,150,250,3,3,3,3")
         response = self._read_response()
         self.assertIn("OK", response)
-        
-        # Check statistics
-        self._send_command("AT+LED_STATS")
-        response = self._read_response()
-        self.assertIn("+LED_STATS:SPI", response)
         
     def test_error_handling(self):
         """Test error conditions"""
@@ -809,7 +806,7 @@ import serial
 
 class PerformanceTests:
     def __init__(self, h2_port):
-        self.h2_serial = serial.Serial(h2_port, 5000000, timeout=1)
+        self.h2_serial = serial.Serial(h2_port, 921600, timeout=1)
         
     def test_at_command_latency(self, iterations=100):
         """Measure AT command response latency"""
@@ -855,13 +852,20 @@ class PerformanceTests:
         
     def test_led_frame_throughput(self, frame_count=50):
         """Test LED frame processing throughput"""
-        pixel_counts = [(100, 100), (500, 500), (1000, 1000)]
-        
-        for ch2_pixels, ch3_pixels in pixel_counts:
-            print(f"Testing {ch2_pixels}+{ch3_pixels} pixels...")
-            
-            # Prepare LED controller
-            cmd = f"AT+LED_PREP={ch2_pixels},{ch3_pixels}\r\n"
+        # Test with different pixel configurations (ch0, ch1, ch2, ch3)
+        pixel_configs = [
+            (100, 100, 0, 0),      # Channels 0-1 only
+            (500, 500, 0, 0),      # Large channels 0-1
+            (100, 100, 100, 100)   # All 4 channels
+        ]
+
+        for px0, px1, px2, px3 in pixel_configs:
+            total_pixels = px0 + px1 + px2 + px3
+            print(f"Testing {total_pixels} pixels ({px0},{px1},{px2},{px3})...")
+
+            # Prepare LED controller (8 params: pixel counts + formats)
+            # Using RGB (format=3) for all channels
+            cmd = f"AT+LED_PREP={px0},{px1},{px2},{px3},3,3,3,3\r\n"
             self.h2_serial.write(cmd.encode())
             self._read_response()
             
@@ -877,8 +881,8 @@ class PerformanceTests:
             
             total_time = end_time - start_time
             frames_per_second = frame_count / total_time
-            pixels_per_second = (ch2_pixels + ch3_pixels) * frames_per_second
-            
+            pixels_per_second = total_pixels * frames_per_second
+
             print(f"  {frames_per_second:.1f} FPS")
             print(f"  {pixels_per_second/1000:.1f}K pixels/sec")
             
