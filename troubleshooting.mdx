@@ -43,8 +43,8 @@ This guide provides specific code locations, debugging procedures, and diagnosti
 **Debugging Steps:**
 ```bash
 # Check WROOM UART pins in hardware.mdx
-GPIO 2  -> UART TX (to C5 RX GPIO1)
-GPIO 3  -> UART RX (from C5 TX GPIO6)
+GPIO 1  -> UART TX (to C5 RX GPIO27)
+GPIO 3  -> UART RX (from C5 TX GPIO1)
 
 # Test basic connectivity
 echo "AT" > /dev/ttyUSB1  # Should return "OK"
@@ -394,16 +394,17 @@ ESP_LOGI(TAG, "GATT access: svc=%d, chr=%d, op=%d", svc_idx, chr_idx, ctxt->op);
 
 1. **ESP32-C5 Pin Configuration** (see `hardware.mdx`):
    ```
-   GPIO 4,5,6,7   -> UART to H2
-   GPIO 10,26,25  -> ParlIO to H2 SPI
-   GPIO 27,28     -> RMT LED outputs (channels 0,1)
+   GPIO 1,27      -> UART to WROOM (TX, RX)
+   GPIO 23,8,28   -> ParlIO to WROOM SPI (CLK, DATA, VALID)
+   GPIO 7,9       -> I2C (SDA, SCL)
+   GPIO 26,27     -> WROOM control (WR_EN, WR_BOOT)
    ```
 
-2. **ESP32-H2 Pin Configuration** (see `hardware.mdx`):
+2. **ESP32 WROOM Pin Configuration** (see `hardware.mdx`):
    ```
-   GPIO 4,5,6,7   -> UART from C5
-   GPIO 10,11,25  -> SPI slave from C5 ParlIO
-   GPIO 27,26     -> RMT LED outputs (channels 2,3)
+   GPIO 1,3       -> UART from C5 (TX, RX)
+   GPIO 18,23,5   -> SPI slave from C5 ParlIO (SCLK, MOSI, CS)
+   GPIO 4,16,17,25 -> RMT LED outputs (channels 0-3)
    ```
 
 **Verify Pin Configuration:**

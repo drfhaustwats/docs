@@ -21,25 +21,24 @@ The ESP32-C5 serves as the primary controller, handling Wi-Fi connectivity, WLED
 
 ### ESP32-C5 GPIO Pin Assignments
 
-#### Inter-MCU Communication (ParlIO)
-| GPIO | Function | Description |
-|------|----------|-------------|
-| 10 | ParlIO Clock Output | 30 MHz clock signal to H2 |
-| 25 | ParlIO Valid Signal | Frame synchronization to H2 |
-| 26 | ParlIO Data | Pixel data transmission to H2 (WLED 3rd LED output) |
-
 #### UART Communication (AT Host)
 | GPIO | Function | Description |
 |------|----------|-------------|
-| 1 | UART RX | Receives AT responses from WROOM |
-| 6 | UART TX | Sends AT commands to WROOM |
+| 1 | UART TX | Sends AT commands to WROOM |
+| 27 | UART RX | Receives AT responses from WROOM |
 
-#### System & Debug
+#### WROOM Control Signals
 | GPIO | Function | Description |
 |------|----------|-------------|
-| 27 | RGB LED | Built-in status indicator |
-| 11 | Debug UART TX | Serial console output |
-| 12 | Debug UART RX | Serial console input |
+| 26 | WR_EN | WROOM reset/enable control |
+| 27 | WR_BOOT | WROOM boot mode control |
+
+#### I2S Audio Interface
+| GPIO | Function | Description |
+|------|----------|-------------|
+| 0 | I2S SD | Serial data |
+| 2 | I2S WS | Word select (L/R clock) |
+| 3 | I2S SCK | Serial clock |
 
 #### Power Board I2C Interface
 | GPIO | Function | Description |
@@ -55,23 +54,16 @@ The ESP32-C5 serves as the primary controller, handling Wi-Fi connectivity, WLED
 #### SPI Interface (W5500 Ethernet)
 | GPIO | Function | Description |
 |------|----------|-------------|
-| 5 | SPI MISO | W5500 data in |
-| 6 | SPI MOSI | W5500 data out |
-| 4 | SPI SCK | W5500 clock |
-| 12 | SPI CS | W5500 chip select |
+| 8 | SPI MOSI | W5500 data out |
+| 10 | SPI MISO | W5500 data in |
+| 23 | SPI SCK | W5500 clock |
+| 28 | SPI CS | W5500 chip select |
 
 **W5500 Configuration:**
 - **Host**: SPI2_HOST
 - **Frequency**: 8 MHz
 - **Reset**: Controlled via power board TCA9555 expander
 - **Interrupt**: Not connected (polling mode)
-
-#### Expandable I/O
-| GPIO | Function | Description |
-|------|----------|-------------|
-| 1-6 | ADC (A0-A5) | Analog input channels |
-| 2-3 | LP I2C | Low-power device interface |
-| 4-5 | LP UART | Low-power serial interface |
 
 ---
 
@@ -92,7 +84,7 @@ The ESP32 WROOM functions as a dedicated LED processor and BLE interface, handli
 #### Inter-MCU Communication (UART)
 | GPIO | Function | Description |
 |------|----------|-------------|
-| 2 | UART TX | Sends AT responses to C5 |
+| 1 | UART TX | Sends AT responses to C5 |
 | 3 | UART RX | Receives AT commands from C5 |
 
 **UART Specifications:**
@@ -104,17 +96,17 @@ The ESP32 WROOM functions as a dedicated LED processor and BLE interface, handli
 #### Data Reception (SPI Slave Mode)
 | GPIO | Function | Description |
 |------|----------|-------------|
-| 10 | SPI Clock Input | 30 MHz clock from C5 |
-| 11 | SPI MOSI | Pixel data from C5 |
-| 25 | SPI Chip Select | Frame sync from C5 |
+| 18 | SPI Clock Input | 30 MHz clock from C5 |
+| 23 | SPI MOSI | Pixel data from C5 |
+| 5 | SPI Chip Select | Frame sync from C5 |
 
 #### LED Output (RMT Channels via NeoPixelBus)
 | GPIO | Function | Description |
 |------|----------|-------------|
-| Configurable | RMT Channel 0 | LED Strip Output Ch-0 (RGB/RGBW) |
-| Configurable | RMT Channel 1 | LED Strip Output Ch-1 (RGB/RGBW) |
-| Configurable | RMT Channel 2 | LED Strip Output Ch-2 (RGB/RGBW) |
-| Configurable | RMT Channel 3 | LED Strip Output Ch-3 (RGB/RGBW) |
+| 4 | RMT Channel 0 | LED Strip Output Ch-0 (RGB/RGBW) |
+| 16 | RMT Channel 1 | LED Strip Output Ch-1 (RGB/RGBW) |
+| 17 | RMT Channel 2 | LED Strip Output Ch-2 (RGB/RGBW) |
+| 25 | RMT Channel 3 | LED Strip Output Ch-3 (RGB/RGBW) |
 
 **NeoPixelBus Configuration:**
 - **Resolution**: 40 MHz RMT clock for precise WS2812/SK6812 timing
@@ -132,12 +124,15 @@ The two MCUs are connected via high-speed parallel interface and UART:
 ```
 ESP32-C5 (Master)           ESP32 WROOM (Slave)
 ─────────────────           ────────────────────
-GPIO 10 (ParlIO CLK)  ────► GPIO 10 (SPI SCLK)
-GPIO 26 (ParlIO DATA) ────► GPIO 11 (SPI MOSI)
-GPIO 25 (ParlIO VALID)────► GPIO 25 (SPI CS)
+GPIO 23 (ParlIO CLK)  ────► GPIO 18 (SPI SCLK)
+GPIO 8  (ParlIO DATA) ────► GPIO 23 (SPI MOSI)
+GPIO 28 (ParlIO VALID)────► GPIO 5  (SPI CS)
 
-GPIO 6  (UART TX)     ────► GPIO 3  (UART RX)
-GPIO 1  (UART RX)     ◄──── GPIO 2  (UART TX)
+GPIO 1  (UART TX)     ────► GPIO 3  (UART RX)
+GPIO 27 (UART RX)     ◄──── GPIO 1  (UART TX)
+
+GPIO 26 (WR_EN)       ────► EN (Reset/Enable)
+GPIO 27 (WR_BOOT)     ────► GPIO 0 (Boot mode)
 
 GND                   ────── GND
 3.3V                  ────── 3.3V
@@ -165,34 +160,38 @@ Both MCUs operate at **3.3V logic levels**. Ensure:
 - Common ground connection
 - Stable 3.3V power supply for both units
 - Proper decoupling capacitors near each MCU
-- Signal integrity for high-speed (20 MHz) connections
+- Signal integrity for high-speed (30 MHz) connections
 
 ---
 
 ## Configuration Notes
 
-### Pin Conflict Resolution
-- **GPIO 25 on C5**: Hardcoded as ParlIO VALID signal; assigned to WLED Channel 4 as placeholder (not used for LED output)
-- **GPIO 26 on C5**: Configured as 3rd LED output in WLED, used for ParlIO data transmission
-- **GPIO 10-11 on H2**: SPI input pins, no conflicts with RMT output channels
+### Pin Configuration System
+All pin assignments are configured via Kconfig and can be modified via `menuconfig` or by editing `sdkconfig`:
 
-### Configurable Options
-All pin assignments can be modified via:
-- **C5**: `#define` macros in header files
-- **H2**: `uart_set_pin()` and peripheral configuration
-- **LED Pins**: RMT channel assignment via configuration
+**ESP32-C5 Pin Configuration:**
+- Located in `components/pins/Kconfig.projbuild`
+- Configured via `CONFIG_PINS_*` symbols in `sdkconfig`
+- Includes I2C, SPI, UART, I2S, and control pins
+
+**ESP32 WROOM Pin Configuration:**
+- Located in `components/pins/Kconfig.projbuild`
+- Configured via `CONFIG_PINS_ESP32_*` and `CONFIG_PINS_SPIS_*` symbols
+- Includes UART, SPI slave, and LED output pins
+
+### ParlIO Pin Mapping
+The C5 uses its SPI pins for ParlIO communication to the WROOM:
+- **ParlIO DATA**: Uses `PINS.spi.mosi` (GPIO 8)
+- **ParlIO CLK**: Uses `PINS.spi.sclk` (GPIO 23)
+- **ParlIO VALID**: Uses `PINS.spi.cs` (GPIO 28)
+
+These mappings are defined in [NeoEsp32ParlC5SharedManager.h:36-42](src/Watts-ESP-IDF-C5/components/NeoPixelBus/src/internal/methods/NeoEsp32ParlC5SharedManager.h#L36-L42)
 
 ### Signal Quality Requirements
 - **Rise/Fall Times**: < 5ns for 30 MHz operation
 - **Cable Length**: Keep inter-MCU connections under 5cm
 - **EMI Shielding**: Consider shielded cables for production units
 - **Ground Plane**: PCB should have continuous ground plane
-
-### WLED Integration Notes
-- **GPIO 26 Configuration**: Set as 3rd LED output in WLED hardware configuration
-- **GPIO 25 Usage**: Assigned to WLED Channel 4 as placeholder (WLED requires a pin assignment but this pin is not used for LED output)
-- **ParlIO Override**: GPIO 25 is hardcoded in ParlIO implementation as VALID signal, regardless of WLED Channel 4 initialization
-- **Pin Manager**: WLED pin manager automatically configures ParlIO data pin (GPIO 26) based on 3rd LED output selection
 
 ---
 
@@ -287,10 +286,10 @@ The power board controls the W5500 ethernet controller's reset line:
 4. Wait 100ms for W5500 boot completion
 
 **W5500 SPI Connection (to ESP32-C5):**
-- **MISO**: GPIO 5
-- **MOSI**: GPIO 6
-- **SCK**: GPIO 4
-- **CS**: GPIO 12
+- **MOSI**: GPIO 8
+- **MISO**: GPIO 10
+- **SCK**: GPIO 23
+- **CS**: GPIO 28
 - **RST**: Controlled via power board TCA9555
 - **INT**: Not connected (polling mode)
 - **Frequency**: 8 MHz
