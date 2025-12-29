@@ -24,7 +24,7 @@ The ESP32-C5 serves as the primary controller, handling Wi-Fi connectivity, WLED
 #### Inter-MCU Communication (ParlIO)
 | GPIO | Function | Description |
 |------|----------|-------------|
-| 10 | ParlIO Clock Output | 80 MHz clock signal to H2 |
+| 10 | ParlIO Clock Output | 30 MHz clock signal to H2 |
 | 25 | ParlIO Valid Signal | Frame synchronization to H2 |
 | 26 | ParlIO Data | Pixel data transmission to H2 (WLED 3rd LED output) |
 
@@ -104,7 +104,7 @@ The ESP32 WROOM functions as a dedicated LED processor and BLE interface, handli
 #### Data Reception (SPI Slave Mode)
 | GPIO | Function | Description |
 |------|----------|-------------|
-| 10 | SPI Clock Input | 80 MHz clock from C5 |
+| 10 | SPI Clock Input | 30 MHz clock from C5 |
 | 11 | SPI MOSI | Pixel data from C5 |
 | 25 | SPI Chip Select | Frame sync from C5 |
 
@@ -147,7 +147,7 @@ GND                   ────── GND
 
 #### High-Speed Pixel Data
 - **Protocol**: ParlIO (C5) → SPI Slave (H2)
-- **Clock Rate**: 80 MHz
+- **Clock Rate**: 30 MHz
 - **Data Width**: 1-bit serial
 - **Frame Size**: Up to 8,008 bytes
 - **Synchronization**: VALID pin for frame boundaries
@@ -183,7 +183,7 @@ All pin assignments can be modified via:
 - **LED Pins**: RMT channel assignment via configuration
 
 ### Signal Quality Requirements
-- **Rise/Fall Times**: < 5ns for 80 MHz operation
+- **Rise/Fall Times**: < 5ns for 30 MHz operation
 - **Cable Length**: Keep inter-MCU connections under 5cm
 - **EMI Shielding**: Consider shielded cables for production units
 - **Ground Plane**: PCB should have continuous ground plane

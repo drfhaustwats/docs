@@ -152,7 +152,7 @@ Serial.printf("Response: %s\n", response_buffer);
            parlio_tx_unit_config_t config = {
                .clk_src = PARLIO_CLK_SRC_DEFAULT,
                .data_width = 8,
-               .clk_out_gpio_num = GPIO_NUM_10,   // 80MHz clock to H2
+               .clk_out_gpio_num = GPIO_NUM_10,   // 30MHz clock to H2
                .valid_gpio_num = GPIO_NUM_25,     // Frame valid signal
            };
        }

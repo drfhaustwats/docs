@@ -16,12 +16,12 @@ The Watts v3 controller implements a sophisticated dual-MCU topology that separa
 |                      ESP32-C5 (Main)                        |
 |  • WLED Effects Engine (Arduino component)                  |
 |  • Wi-Fi 2.4 / 5 GHz STA/AP + Ethernet (W5500)              |
-|  • ParlIO TX 1-bit @ 80 MHz + VALID pin → pixel stream      |
+|  • ParlIO TX 1-bit @ 30 MHz + VALID pin → pixel stream      |
 |  • RMT-TX Channel 0,1 → Local LED Strips                    |
 |  • AT-Host task over UART0                                  |
 |  • I2C Master → Watts Power Board                           |
 +-----------------------▲-------------------------------------+
-                        | 80 MHz ParlIO (DATA / CLK / VALID)
+                        | 30 MHz ParlIO (DATA / CLK / VALID)
                         | Frame-select header + Ch-0/1/2/3 pixels
 +-----------------------▼-------------------------------------+
 |                    ESP32 WROOM (Secondary)                  |
@@ -46,7 +46,7 @@ The Watts v3 controller implements a sophisticated dual-MCU topology that separa
 |---|---|---|
 | **LED Channels** | Ch-0, Ch-1 (local RMT-TX) | Ch-0, Ch-1, Ch-2, Ch-3 (all RMT-TX) |
 | **Effects Engine** | WLED renders full 4-channel frame | Mirrors pixel data |
-| **Pixel Transport** | ParlIO TX, 80 MHz + VALID | ParlIO/SPI-Slave DMA RX |
+| **Pixel Transport** | ParlIO TX, 30 MHz + VALID | ParlIO/SPI-Slave DMA RX |
 | **Network Stack** | Wi-Fi 2.4/5 GHz, Ethernet (W5500) | BLE (GAP + GATT) |
 | **Power Monitoring** | I2C master for power board | N/A |
 | **AT Protocol Role** | Master / Host | Slave / Device |
@@ -80,7 +80,7 @@ Built on proven Arduino ecosystem components:
 ## Communication Architecture
 
 The system uses three primary communication channels:
-1. **30 MHz ParlIO**: High-speed pixel data streaming (80 MHz clock, 30 MHz effective data rate)
+1. **30 MHz ParlIO**: High-speed pixel data streaming (30 MHz clock, 3.38 MB/s effective data rate)
 2. **921.6 kbaud UART**: AT command protocol and firmware updates
 3. **Wi-Fi/Ethernet/BLE**: User control interfaces
 

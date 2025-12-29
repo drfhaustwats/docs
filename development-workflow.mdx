@@ -523,7 +523,7 @@ if __name__ == "__main__":
 **Recommended Channels:**
 1. **UART TX (C5→WROOM)** - AT commands
 2. **UART RX (WROOM→C5)** - AT responses
-3. **SPI CLK** - 80MHz frame clock
+3. **SPI CLK** - 30MHz frame clock
 4. **SPI MOSI** - Frame data
 5. **SPI CS** - Frame valid signal
 6. **LED CH0 Output** - RMT channel 0
@@ -536,7 +536,7 @@ if __name__ == "__main__":
 Trigger: UART TX edge, decode: UART (921.6kbaud, 8N1)
 
 # Frame Data Analysis  
-Trigger: SPI CS falling edge, decode: SPI (80MHz, Mode 0)
+Trigger: SPI CS falling edge, decode: SPI (30MHz, Mode 0)
 
 # LED Output Timing
 Trigger: LED output rising edge, timebase: 100ns/div

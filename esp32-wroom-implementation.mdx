@@ -32,7 +32,7 @@ The ESP32-H2 firmware implements a multi-subsystem architecture:
 │  │   SPI Slave LED Controller │  │  RMT LED Output        │ │
 │  │   • Frame Reception        │  │  • Channels 2-3        │ │
 │  │   • CRC Validation         │  │  • WS2812 Protocol     │ │
-│  │   • 80MHz Data Stream      │  │  • Synchronized Output │ │
+│  │   • 30MHz Data Stream      │  │  • Synchronized Output │ │
 │  └─────────────────────────────┘  └─────────────────────────┘ │
 └─────────────────────────────────────────────────────────────┘
 ```
@@ -1080,7 +1080,7 @@ esptool.py --port /dev/ttyUSB0 write_flash 0x190000 build/EspAt_firmware.bin
 - **Stack**: 8KB (CAT) + 4KB×2 (LED) + 4KB (BLE) = 20KB total
 
 **Real-time Performance:**
-- **SPI Reception**: 80 MHz, DMA-based, &lt;1% CPU
+- **SPI Reception**: 30 MHz, DMA-based, &lt;1% CPU
 - **Frame Processing**: ~5µs CRC validation
 - **RMT Output**: Synchronized dual-channel with &lt;5µs latency
 - **BLE Latency**: Standard BLE characteristics (&lt;50ms)
