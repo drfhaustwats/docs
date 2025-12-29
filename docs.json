@@ -17,11 +17,11 @@
             "group": "Getting started",
             "pages": [
               "index",
-              "hardware", 
+              "hardware",
               "arduino-setup",
               "at-protocol",
               "esp32-c5-implementation",
-              "esp32-h2-implementation",
+              "esp32-wroom-implementation",
               "frame-data-protocol",
               "development-workflow",
               "troubleshooting",
