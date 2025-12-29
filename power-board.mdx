@@ -15,12 +15,12 @@ The power board operates on the ESP32-C5's I2C bus (default: SDA=GPIO7, SCL=GPIO
 
 | Device | Address | Purpose | Channels |
 |--------|---------|---------|----------|
-| **TCA9555 I/O Expander** | 0x21 | Power board GPIO control, W5500 reset | - |
+| **Main Board Expander** | 0x20 | Overcurrent interrupt aggregation (POWER_INT on P1.7) | - |
+| **Power Board Expander** | 0x21 | Power board GPIO, W5500 reset, ALERT pin monitoring (P1.0-P1.3) | - |
 | **INA237 Power Monitor 1** | 0x40 | Current/voltage/power/temp sensing | Channel 0 |
 | **INA237 Power Monitor 2** | 0x44 | Current/voltage/power/temp sensing | Channel 1 |
 | **INA237 Power Monitor 3** | 0x48 | Current/voltage/power/temp sensing | Channel 2 |
 | **INA237 Power Monitor 4** | 0x4C | Current/voltage/power/temp sensing | Channel 3 |
-| **Main Board Expander** | 0x20 | System GPIO (reserved, currently unused) | - |
 | **STM32 Slave** | 0x50 | A3942 motor driver control (optional) | 4 channels |
 
 ### Thread-Safe I2C Access
