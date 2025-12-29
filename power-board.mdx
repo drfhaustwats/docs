@@ -1,0 +1,816 @@
+---
+title: "Watts Power Board"
+description: "Comprehensive documentation for the Watts v3 power monitoring and management system"
+---
+
+# Watts Power Board
+
+The Watts Power Board is a comprehensive I2C-based power monitoring and management system for the ESP32-C5 controller. It provides real-time current/voltage/power/temperature monitoring for 4 LED channels, automatic overcurrent protection, and W5500 ethernet controller integration.
+
+## Hardware Architecture
+
+### I2C Topology
+
+The power board operates on the ESP32-C5's I2C bus (default: SDA=GPIO7, SCL=GPIO9, 100kHz) and integrates multiple devices:
+
+| Device | Address | Purpose | Channels |
+|--------|---------|---------|----------|
+| **TCA9555 I/O Expander** | 0x21 | Power board GPIO control, W5500 reset | - |
+| **INA237 Power Monitor 1** | 0x40 | Current/voltage/power/temp sensing | Channel 0 |
+| **INA237 Power Monitor 2** | 0x44 | Current/voltage/power/temp sensing | Channel 1 |
+| **INA237 Power Monitor 3** | 0x48 | Current/voltage/power/temp sensing | Channel 2 |
+| **INA237 Power Monitor 4** | 0x4C | Current/voltage/power/temp sensing | Channel 3 |
+| **Main Board Expander** | 0x20 | System GPIO (reserved, currently unused) | - |
+| **STM32 Slave** | 0x50 | A3942 motor driver control (optional) | 4 channels |
+
+### Thread-Safe I2C Access
+
+All I2C operations are serialized through a dedicated FreeRTOS worker task to prevent bus contention:
+
+```cpp
+// I2C worker task pattern ensures thread-safe access
+static QueueHandle_t s_i2c_queue;
+static TaskHandle_t s_i2c_task_hdl;
+
+// All I2C operations queued and executed sequentially
+watts_i2c_op_t op = {
+    .type = I2C_OP_READ16,
+    .addr7 = 0x40,
+    .reg = 0x01,
+    .done = xSemaphoreCreateBinary()
+};
+
+xQueueSend(s_i2c_queue, &op, portMAX_DELAY);
+xSemaphoreTake(op.done, portMAX_DELAY);  // Wait for completion
+```
+
+**Benefits:**
+- Safe concurrent access from multiple tasks (monitor task, main loop, WLED effects)
+- Prevents I2C bus lockup from conflicting transactions
+- Enables precise timing for overcurrent detection polling
+
+## Configuration
+
+### Basic Configuration
+
+Initialize the power board with default settings:
+
+```cpp
+#include "watts_power_board.h"
+
+watts_probe_result_t probe;
+
+// Use defaults: SDA=7, SCL=9, 100kHz, auto-start monitor
+bool ok = watts_power_begin(NULL, &probe);
+
+if (ok) {
+    Serial.println("Power board ready");
+    Serial.printf("Devices: exp=%d ina=[%d %d %d %d] stm=%d\n",
+                  probe.expander_ok,
+                  probe.ina_ok[0], probe.ina_ok[1], probe.ina_ok[2], probe.ina_ok[3],
+                  probe.stm_ok);
+}
+```
+
+### Advanced Configuration
+
+Customize pin mappings, timing, and overcurrent behavior:
+
+```cpp
+watts_power_config_t cfg = {};
+
+// I2C bus configuration
+cfg.init_wire = true;           // Initialize Wire library (set false if already initialized)
+cfg.sda_pin = 7;                // I2C SDA pin (GPIO7)
+cfg.scl_pin = 9;                // I2C SCL pin (GPIO9)
+cfg.freq_hz = 100000;           // I2C frequency (100kHz)
+cfg.int_gpio = 25;              // GPIO for main expander INT (optional, currently unused)
+
+// Monitor task configuration
+cfg.auto_start_monitor = true;  // Automatically start monitoring task
+cfg.monitor_period_ms = 50;     // Polling interval (50ms = 20Hz)
+cfg.monitor_priority = 5;       // FreeRTOS task priority
+cfg.stack_words = 4096;         // Task stack size (4KB)
+
+// Overcurrent auto-clear configuration
+cfg.oc_first_clear_delay_ms = 5000;   // Wait 5 seconds before first clear attempt
+cfg.oc_retry_interval_ms = 60000;     // Retry every 60 seconds after failure
+cfg.oc_max_attempts = 10;             // Give up after 10 failed attempts
+
+bool ok = watts_power_begin(&cfg, &probe);
+```
+
+**Configuration Field Reference:**
+
+| Field | Type | Default | Description |
+|-------|------|---------|-------------|
+| `init_wire` | bool | true | Initialize Wire.begin() and Wire.setClock() |
+| `sda_pin` | int | 7 | I2C SDA GPIO pin |
+| `scl_pin` | int | 9 | I2C SCL GPIO pin |
+| `freq_hz` | uint32_t | 100000 | I2C bus frequency (Hz) |
+| `int_gpio` | int | 25 | Main expander interrupt GPIO (reserved) |
+| `auto_start_monitor` | bool | true | Start monitor task automatically |
+| `monitor_period_ms` | uint32_t | 50 | Monitor task polling interval (ms) |
+| `monitor_priority` | unsigned | 5 | FreeRTOS task priority (1-10) |
+| `stack_words` | uint32_t | 4096 | Monitor task stack size (words) |
+| `oc_first_clear_delay_ms` | uint32_t | 5000 | Delay before first OC clear attempt |
+| `oc_retry_interval_ms` | uint32_t | 60000 | Interval between retry attempts |
+| `oc_max_attempts` | uint8_t | 10 | Maximum number of clear attempts |
+
+## Power Monitoring
+
+### INA237 Measurements
+
+Each of the 4 LED channels is monitored by a dedicated INA237 power monitor providing:
+
+- **Current**: ±16A range, 0.1mA resolution
+- **Voltage**: Bus voltage measurement, 1mV resolution
+- **Power**: Calculated from current × voltage
+- **Temperature**: On-die temperature sensor, 1°C resolution
+- **Alert flags**: Overcurrent detection, temperature alerts
+
+### Reading Measurements
+
+**Read a single channel:**
+
+```cpp
+watts_channel_meas_t meas;
+
+if (watts_power_read_channel(0, &meas, false, false)) {
+    Serial.printf("CH0: %d mA, %d mV, %d mW, %d°C\n",
+                  meas.current_mA,
+                  meas.voltage_mV,
+                  meas.power_mW,
+                  meas.temp_C);
+
+    if (meas.overcurrent) {
+        Serial.println("!!! OVERCURRENT !!!");
+    }
+}
+```
+
+**Read all channels at once:**
+
+```cpp
+watts_all_meas_t all;
+
+if (watts_power_read_all(&all, false, false)) {
+    for (int ch = 0; ch < 4; ch++) {
+        Serial.printf("CH%d: %d mA, %d mV\n",
+                      ch,
+                      all.ch[ch].current_mA,
+                      all.ch[ch].voltage_mV);
+    }
+}
+```
+
+**Get cached snapshot (fastest):**
+
+```cpp
+watts_power_snapshot_t snap;
+
+if (watts_power_get_snapshot(&snap) && snap.valid) {
+    // snapshot.meas contains all 4 channels
+    // snapshot.oc_mask shows which channels have latched OC
+    // snapshot.last_update_ms shows data freshness
+
+    for (int ch = 0; ch < 4; ch++) {
+        if (snap.oc_mask & (1 << ch)) {
+            Serial.printf("CH%d: OVERCURRENT LATCHED\n", ch);
+        }
+    }
+}
+```
+
+**Function Parameters:**
+- `super_display` (bool): Use high-resolution averaging mode (slower, more accurate)
+- `read_alerts` (bool): Read alert register and decode flags
+
+### WLED Integration: LED Detection
+
+The power board enables automatic LED detection by measuring current draw:
+
+```cpp
+// File: components/wled/led_detect.cpp
+#include "watts_power_board.h"
+
+// Sample current across all 4 channels
+for (int s = 0; s < samples; s++) {
+    for (int ch = 0; ch < 4; ch++) {
+        watts_channel_meas_t meas;
+        if (watts_power_read_channel(ch, &meas, false, false)) {
+            out_per_ch[ch] += meas.current_mA;  // Accumulate
+        }
+    }
+    vTaskDelay(pdMS_TO_TICKS(10));
+}
+
+// Average and detect LED protocol by current signature
+for (int ch = 0; ch < 4; ch++) {
+    int32_t avg_mA = out_per_ch[ch] / samples;
+
+    if (avg_mA > 500) {
+        detected_type[ch] = LED_TYPE_RGBW;  // High current = RGBW
+    } else if (avg_mA > 200) {
+        detected_type[ch] = LED_TYPE_RGB;   // Medium current = RGB
+    }
+}
+```
+
+This allows WLED to automatically configure NeoPixelBus instances based on measured power consumption.
+
+## Automatic Overcurrent Protection
+
+The monitor task provides intelligent overcurrent detection and automatic clearing without application intervention.
+
+### How It Works
+
+1. **Detection** - Monitor task polls INA237 ALERT pin and DIAG_ALERT register every 50ms
+2. **Latching** - Overcurrent event sets bit in `oc_mask` (bit 0-3 for channels 0-3)
+3. **Delay** - Waits 5 seconds (configurable) before first clear attempt
+4. **Clearing** - 3-step clear sequence: read INA237 DIAG_ALERT, send STM32 clear command, poll ALERT pin for 1s
+5. **Retry** - If clear fails, retries every 60 seconds (configurable) up to 10 attempts (configurable)
+6. **Logging** - All events logged with ESP_LOG for debugging
+
+### Clear Sequence Details
+
+```cpp
+// Step 1: Read INA237 DIAG_ALERT register (clears software latch)
+uint16_t diag_alert;
+read_ina237_reg(ch_addr, 0x0B, &diag_alert);
+
+// Step 2: Send STM32 clear command (clears A3942 hardware fault)
+watts_stm_clear_fault_flags();
+
+// Step 3: Poll hardware ALERT pin for 1 second to verify stability
+int poll_success = 0;
+for (int i = 0; i < 20; i++) {  // 20 polls at 50ms = 1 second
+    vTaskDelay(pdMS_TO_TICKS(50));
+
+    uint8_t alert_val;
+    read_expander_input_port(&alert_val);
+
+    if (!(alert_val & (1 << ch))) {
+        poll_success++;  // ALERT pin high = cleared
+    }
+}
+
+if (poll_success == 20) {
+    ESP_LOGI("POWER_MON", "✓ Clear SUCCESS mask=0x%02X", (1 << ch));
+    oc_mask &= ~(1 << ch);  // Clear latched bit
+} else {
+    ESP_LOGW("POWER_MON", "✗ Clear FAILED mask=0x%02X (will retry)", (1 << ch));
+}
+```
+
+### Manual Intervention (Optional)
+
+While automatic clearing handles most cases, you can manually trigger a clear:
+
+```cpp
+// Manually request clear on channels 0 and 2
+watts_power_request_manual_clear(0x05);  // Mask: 0b0101
+
+// Check current overcurrent state
+uint8_t mask = watts_power_get_overcurrent_mask();
+if (mask & 0x01) {
+    Serial.println("Channel 0 has latched overcurrent");
+}
+```
+
+### Expected Log Output
+
+```
+I WATTS_PWR: Power board initialized
+I WATTS_PWR: Monitor task started (period=50ms)
+I POWER_MON: Monitor task started
+I POWER_MON:   First clear delay: 5000 ms
+I POWER_MON:   Retry interval: 60000 ms
+I POWER_MON:   Max attempts: 10
+
+[Overcurrent occurs on Channel 2]
+
+E POWER_MON: !!! OVERCURRENT CH2 !!!
+I POWER_MON: A3942 CH2: 0xFF -> 0xC4
+I POWER_MON:   CH2: [OL] Open Load
+
+[5 seconds pass]
+
+W POWER_MON: CH2: Clear attempt 1
+I POWER_MON: CH2: CLEARED (20/20 polls)
+I POWER_MON: ✓ Clear SUCCESS mask=0x04
+I POWER_MON: Channel 2 overcurrent CLEARED
+I POWER_MON: A3942 CH2: 0xC4 -> 0x00
+I POWER_MON:   CH2: [OK] No faults
+```
+
+## STM32 Slave Integration (Optional)
+
+If the STM32 slave is detected during initialization (`g_probe.stm_ok == true`), the power board provides A3942 motor driver control and fault monitoring.
+
+### A3942 Motor Driver Commands
+
+**Enable/disable all outputs:**
+
+```cpp
+// Enable all 4 LED channel outputs
+watts_stm_enable_outputs();
+
+// Disable all outputs (emergency stop)
+watts_stm_disable_outputs();
+```
+
+**Per-channel control:**
+
+```cpp
+// Enable individual channels
+watts_stm_enable_channel(0);  // Enable channel 0
+watts_stm_enable_channel(2);  // Enable channel 2
+
+// Disable individual channels
+watts_stm_disable_channel(1);
+```
+
+**Reset and fault clearing:**
+
+```cpp
+// Reset A3942 driver chip
+watts_stm_reset_a3942();
+
+// Clear latched fault flags
+watts_stm_clear_fault_flags();
+```
+
+**Read status and faults:**
+
+```cpp
+// Read global status register
+uint8_t status;
+if (watts_stm_read_status(&status)) {
+    if (status & 0x01) Serial.println("Outputs enabled");
+    if (status & 0x80) Serial.println("Fault detected");
+}
+
+// Read per-channel fault codes
+uint8_t fault;
+if (watts_stm_read_fault(2, &fault)) {
+    if (fault & 0x80) Serial.println("CH2: Open Load");
+    if (fault & 0x40) Serial.println("CH2: Short to Ground");
+    if (fault & 0x20) Serial.println("CH2: Short to Battery");
+    if (fault & 0x10) Serial.println("CH2: Overtemperature");
+}
+```
+
+### A3942 Fault Decoding
+
+| Bit | Mask | Fault Code | Description |
+|-----|------|------------|-------------|
+| 7 | 0x80 | [OL] | Open Load - No LED strip connected |
+| 6 | 0x40 | [STG] | Short to Ground - Output shorted to GND |
+| 5 | 0x20 | [STB] | Short to Battery - Output shorted to V+ |
+| 4 | 0x10 | [OT] | Overtemperature - Thermal shutdown |
+| 3-0 | 0x0F | - | Reserved |
+
+The monitor task automatically logs fault state changes:
+
+```
+I POWER_MON: A3942 CH2: 0x00 -> 0xC4
+I POWER_MON:   CH2: [OL] Open Load
+I POWER_MON:   CH2: [STG] Short to Ground
+```
+
+### WLED Integration: STM32 Initialization
+
+```cpp
+// File: components/wled/wled.cpp
+watts_probe_result_t g_probe;
+bool ok = watts_power_begin(NULL, &g_probe);
+
+if (watts_power_is_present() && g_probe.stm_ok) {
+    // Read current STM32 status
+    uint8_t status = 0;
+    watts_stm_read_status(&status);
+    ESP_LOGI("POWER", "STM status: 0x%02X", status);
+
+    // Enable all LED outputs
+    watts_stm_enable_all();
+    ESP_LOGI("POWER", "STM outputs enabled");
+} else {
+    ESP_LOGW("POWER", "STM not detected, running in INA-only mode");
+}
+```
+
+## W5500 Ethernet Integration
+
+The power board controls the W5500 ethernet controller's reset line via the TCA9555 I/O expander.
+
+### Reset Control
+
+```cpp
+// Reset W5500 ethernet controller
+watts_power_reset_w5500();
+
+// W5500 reset sequence:
+// 1. Set RESET pin LOW (via expander GPIO)
+// 2. Wait 10ms
+// 3. Set RESET pin HIGH
+// 4. Wait 100ms for W5500 boot
+```
+
+### WLED Ethernet Initialization
+
+The power board presence gates ethernet initialization:
+
+```cpp
+// File: components/wled/wled.cpp
+#include "esp32_w5500.h"
+
+if (watts_power_is_present()) {
+    // Power board detected - initialize ethernet
+    watts_power_reset_w5500();
+
+    // W5500 SPI configuration for ESP32-C5
+    // MISO=5, MOSI=6, SCK=4, CS=12, INT=-1, SPI_FREQ=8MHz, SPI2_HOST
+    uint8_t identity_mac[6];
+    NetSwitcher_init_identity_mac(identity_mac);  // Use Wi-Fi MAC
+
+    W5500ETH.begin(5, 6, 4, 12, -1, 8 /*MHz*/, SPI2_HOST, identity_mac, ethHost);
+
+    Serial.println("Ethernet initialized via power board");
+} else {
+    Serial.println("No power board - skipping Ethernet");
+}
+```
+
+**W5500 Pin Mapping (ESP32-C5):**
+| Pin | GPIO | Function |
+|-----|------|----------|
+| MISO | 5 | SPI data in |
+| MOSI | 6 | SPI data out |
+| SCK | 4 | SPI clock |
+| CS | 12 | Chip select |
+| RST | - | Controlled via TCA9555 expander |
+
+See [esp32_w5500.h](src/Watts-ESP-IDF-C5/components/eth_w5500/include/w5500.h) for W5500 register definitions and protocol details.
+
+## API Reference
+
+### Initialization
+
+#### watts_power_begin
+
+Initialize the power board and probe for connected devices.
+
+```cpp
+bool watts_power_begin(const watts_power_config_t *cfg,
+                       watts_probe_result_t *probe_out);
+```
+
+**Parameters:**
+- `cfg` - Configuration struct, or NULL for defaults
+- `probe_out` - Receives device detection results
+
+**Returns:** `true` if power board expander and at least one INA237 detected
+
+**Behavior:**
+1. Initialize I2C bus (if `cfg->init_wire == true`)
+2. Create I2C worker task and queue
+3. Probe for all I2C devices (expander, 4× INA237, main expander, STM32)
+4. Configure power board expander GPIO directions
+5. Configure INA237 overcurrent thresholds
+6. Pulse W5500 reset line
+7. Start monitor task (if `cfg->auto_start_monitor == true`)
+
+#### watts_power_is_present
+
+Check if power board was successfully initialized.
+
+```cpp
+bool watts_power_is_present(void);
+```
+
+**Returns:** `true` if `watts_power_begin()` succeeded
+
+### Measurement Functions
+
+#### watts_power_read_channel
+
+Read measurements from a single channel.
+
+```cpp
+bool watts_power_read_channel(int index,
+                              watts_channel_meas_t *out,
+                              bool super_display,
+                              bool read_alerts);
+```
+
+**Parameters:**
+- `index` - Channel number (0-3)
+- `out` - Receives measurement data
+- `super_display` - Use high-resolution averaging mode
+- `read_alerts` - Read and decode INA237 alert register
+
+**Returns:** `true` if read successful
+
+#### watts_power_read_all
+
+Read measurements from all 4 channels.
+
+```cpp
+bool watts_power_read_all(watts_all_meas_t *out,
+                          bool super_display,
+                          bool read_alerts);
+```
+
+**Parameters:**
+- `out` - Receives all channel measurements
+- `super_display` - Use high-resolution mode
+- `read_alerts` - Read alert registers
+
+**Returns:** `true` if all reads successful
+
+#### watts_power_get_snapshot
+
+Get cached measurements from monitor task (fastest, no I2C transaction).
+
+```cpp
+bool watts_power_get_snapshot(watts_power_snapshot_t *out);
+```
+
+**Parameters:**
+- `out` - Receives cached snapshot
+
+**Returns:** `true` if snapshot valid
+
+**Snapshot Structure:**
+```cpp
+typedef struct {
+    bool valid;                    // Data is valid
+    uint32_t last_update_ms;       // Timestamp of last update
+    watts_all_meas_t meas;         // All 4 channel measurements
+    uint8_t oc_mask;               // Latched OC bits (bit 0-3)
+} watts_power_snapshot_t;
+```
+
+### Overcurrent Functions
+
+#### watts_power_request_manual_clear
+
+Manually trigger overcurrent clear on specific channels.
+
+```cpp
+void watts_power_request_manual_clear(uint8_t mask);
+```
+
+**Parameters:**
+- `mask` - Channel bitmask (bit 0-3 for channels 0-3)
+
+**Example:**
+```cpp
+watts_power_request_manual_clear(0x05);  // Clear channels 0 and 2
+```
+
+#### watts_power_get_overcurrent_mask
+
+Get current latched overcurrent state.
+
+```cpp
+uint8_t watts_power_get_overcurrent_mask(void);
+```
+
+**Returns:** Bitmask of latched overcurrent channels (bit 0-3)
+
+### Expander Functions
+
+#### watts_tca9555_write_reg
+
+Write to TCA9555 power board expander register.
+
+```cpp
+bool watts_tca9555_write_reg(uint8_t reg, uint8_t value);
+```
+
+**Parameters:**
+- `reg` - Register address (0x00-0x07)
+- `value` - Byte to write
+
+**Returns:** `true` if write successful
+
+#### watts_tca9555_read_reg
+
+Read from TCA9555 power board expander register.
+
+```cpp
+bool watts_tca9555_read_reg(uint8_t reg, uint8_t *value);
+```
+
+**Parameters:**
+- `reg` - Register address
+- `value` - Receives read byte
+
+**Returns:** `true` if read successful
+
+#### watts_power_reset_w5500
+
+Pulse W5500 ethernet controller reset line.
+
+```cpp
+bool watts_power_reset_w5500(void);
+```
+
+**Returns:** `true` if reset sequence completed
+
+**Timing:** 10ms LOW, 100ms HIGH delay
+
+### STM32 Functions
+
+#### watts_stm_enable_outputs / watts_stm_disable_outputs
+
+Enable or disable all LED outputs globally.
+
+```cpp
+bool watts_stm_enable_outputs(void);
+bool watts_stm_disable_outputs(void);
+```
+
+**Returns:** `true` if command successful
+
+#### watts_stm_enable_all / watts_stm_disable_all
+
+Convenience functions combining enable/disable with reset.
+
+```cpp
+bool watts_stm_enable_all(void);   // Reset + enable outputs
+bool watts_stm_disable_all(void);  // Reset + disable outputs
+```
+
+#### watts_stm_enable_channel / watts_stm_disable_channel
+
+Enable or disable individual LED channels.
+
+```cpp
+bool watts_stm_enable_channel(uint8_t channel);   // channel: 0-3
+bool watts_stm_disable_channel(uint8_t channel);
+```
+
+**Returns:** `true` if command successful
+
+#### watts_stm_reset_a3942
+
+Reset A3942 motor driver chip.
+
+```cpp
+bool watts_stm_reset_a3942(void);
+```
+
+**Returns:** `true` if reset successful
+
+#### watts_stm_clear_fault_flags
+
+Clear latched fault flags in A3942.
+
+```cpp
+bool watts_stm_clear_fault_flags(void);
+```
+
+**Returns:** `true` if clear successful
+
+#### watts_stm_read_status
+
+Read STM32 global status register.
+
+```cpp
+bool watts_stm_read_status(uint8_t *status);
+```
+
+**Parameters:**
+- `status` - Receives status byte
+
+**Returns:** `true` if read successful
+
+#### watts_stm_read_fault
+
+Read A3942 fault register for specific channel.
+
+```cpp
+bool watts_stm_read_fault(uint8_t channel, uint8_t *fault);
+```
+
+**Parameters:**
+- `channel` - Channel number (0-3)
+- `fault` - Receives fault byte
+
+**Returns:** `true` if read successful
+
+## Thread Safety
+
+All public API functions are thread-safe and can be called from any task:
+
+- **I2C operations** - Serialized through FreeRTOS queue
+- **Snapshot access** - Protected by mutex
+- **Monitor task** - Independent, non-blocking operation
+
+**Safe concurrent usage:**
+```cpp
+// Task 1: WLED rendering
+void wled_task() {
+    watts_power_snapshot_t snap;
+    watts_power_get_snapshot(&snap);  // Thread-safe
+}
+
+// Task 2: Web API handler
+void api_task() {
+    watts_channel_meas_t meas;
+    watts_power_read_channel(0, &meas, false, false);  // Thread-safe
+}
+
+// Task 3: Monitor task (internal)
+// Continuously updates snapshot and handles overcurrent
+```
+
+## Troubleshooting
+
+### Power Board Not Detected
+
+**Symptom:** `watts_power_begin()` returns `false`
+
+**Check:**
+1. I2C wiring - SDA=GPIO7, SCL=GPIO9, pull-ups present
+2. I2C bus frequency - Try reducing to 50kHz
+3. Power supply - Ensure power board has stable 5V/12V
+4. Probe result - Check which specific devices failed:
+   ```cpp
+   watts_probe_result_t probe;
+   watts_power_begin(NULL, &probe);
+
+   Serial.printf("Expander: %d\n", probe.expander_ok);
+   Serial.printf("INA0: %d, INA1: %d, INA2: %d, INA3: %d\n",
+                 probe.ina_ok[0], probe.ina_ok[1],
+                 probe.ina_ok[2], probe.ina_ok[3]);
+   Serial.printf("STM: %d\n", probe.stm_ok);
+   ```
+
+### Overcurrent Not Clearing
+
+**Symptom:** Overcurrent latched, clear attempts failing
+
+**Check:**
+1. Physical fault - Verify LED strip connection, no shorts
+2. Clear timing - Increase `oc_first_clear_delay_ms` to 10 seconds
+3. Retry count - Increase `oc_max_attempts` to 20
+4. STM32 presence - Clear requires STM32 slave for A3942 reset
+5. Logs - Check for "Clear FAILED" messages with reason
+
+**Manual intervention:**
+```cpp
+// Force manual clear after fixing physical issue
+watts_power_request_manual_clear(0x0F);  // All channels
+```
+
+### Ethernet Not Initializing
+
+**Symptom:** W5500 not responding, no link
+
+**Check:**
+1. Power board presence - Ethernet requires power board for reset
+2. SPI wiring - MISO=5, MOSI=6, SCK=4, CS=12
+3. Reset sequence - Call `watts_power_reset_w5500()` before `W5500ETH.begin()`
+4. SPI speed - Try reducing to 4MHz
+5. MAC address - Ensure valid MAC passed to `W5500ETH.begin()`
+
+### I2C Bus Lockup
+
+**Symptom:** I2C operations hang or timeout
+
+**Check:**
+1. Multiple masters - Only ESP32-C5 should be I2C master
+2. Clock stretching - Some devices may stretch clock excessively
+3. Worker task - Ensure monitor task is running (`auto_start_monitor = true`)
+4. Queue depth - I2C queue may be full (increase `configQUEUE_REGISTRY_SIZE`)
+
+**Recovery:**
+```cpp
+// Reinitialize I2C bus
+Wire.end();
+Wire.begin(7, 9);
+Wire.setClock(100000);
+
+// Restart power board
+watts_power_begin(NULL, &probe);
+```
+
+### Incorrect Measurements
+
+**Symptom:** Current/voltage readings nonsensical
+
+**Check:**
+1. Calibration - INA237 requires proper shunt resistor calibration
+2. Overcurrent threshold - May be set too low, causing false positives
+3. Super display mode - Try `super_display = true` for better accuracy
+4. Sample averaging - Use `watts_power_get_snapshot()` for averaged data
+
+## See Also
+
+- [ESP32-C5 Implementation](esp32-c5-implementation.mdx) - Main controller architecture
+- [WLED Integration](esp32-c5-implementation.mdx#wled-integration) - How WLED uses the power board
+- [W5500 Ethernet Component](src/Watts-ESP-IDF-C5/components/eth_w5500/) - Ethernet controller integration

@@ -1,11 +1,11 @@
 ---
 title: "Hardware & Pinouts"
-description: "ESP32-C5 and ESP32-H2 hardware specifications, GPIO assignments, and inter-MCU connections"
+description: "ESP32-C5 and ESP32 WROOM hardware specifications, GPIO assignments, inter-MCU connections, and power board integration"
 ---
 
 # Hardware Architecture & Pinouts
 
-This section details the hardware specifications, GPIO pin assignments, and physical connections for both microcontrollers in the Watts v3 dual-MCU lighting system.
+This section details the hardware specifications, GPIO pin assignments, and physical connections for both microcontrollers in the Watts v3 dual-MCU lighting system, plus the integrated Watts Power Board.
 
 ## ESP32-C5 Main Controller
 
@@ -43,30 +43,53 @@ The ESP32-C5 serves as the primary controller, handling Wi-Fi connectivity, WLED
 | 11 | Debug UART TX | Serial console output |
 | 12 | Debug UART RX | Serial console input |
 
+#### Power Board I2C Interface
+| GPIO | Function | Description |
+|------|----------|-------------|
+| 7 | I2C SDA | Watts Power Board data line |
+| 9 | I2C SCL | Watts Power Board clock line |
+
+**I2C Configuration:**
+- **Frequency**: 100 kHz
+- **Devices**: TCA9555 expander (0x21), 4× INA237 (0x40-0x4C), STM32 slave (0x50), Main expander (0x20)
+- **Purpose**: Power monitoring, W5500 reset control, overcurrent protection
+
+#### SPI Interface (W5500 Ethernet)
+| GPIO | Function | Description |
+|------|----------|-------------|
+| 5 | SPI MISO | W5500 data in |
+| 6 | SPI MOSI | W5500 data out |
+| 4 | SPI SCK | W5500 clock |
+| 12 | SPI CS | W5500 chip select |
+
+**W5500 Configuration:**
+- **Host**: SPI2_HOST
+- **Frequency**: 8 MHz
+- **Reset**: Controlled via power board TCA9555 expander
+- **Interrupt**: Not connected (polling mode)
+
 #### Expandable I/O
 | GPIO | Function | Description |
 |------|----------|-------------|
-| 0-1 | I2C (SDA/SCL) | Sensor/display interface |
-| 6,8,9,10 | SPI | External device interface |
 | 1-6 | ADC (A0-A5) | Analog input channels |
 | 2-3 | LP I2C | Low-power device interface |
 | 4-5 | LP UART | Low-power serial interface |
 
 ---
 
-## ESP32-H2 Secondary Controller
+## ESP32 WROOM Secondary Controller
 
 ### Overview & Specifications
-The ESP32-H2 functions as a dedicated LED processor and BLE interface, handling remote LED channels and low-power connectivity.
+The ESP32 WROOM functions as a dedicated LED processor and BLE interface, handling all 4 LED channels and low-power connectivity.
 
 **Key Capabilities:**
-- **CPU**: RISC-V single-core, up to 96 MHz
-- **BLE**: Bluetooth 5.2, Mesh, Thread, Zigbee ready
-- **Memory**: 4MB Flash, 320KB SRAM
-- **Peripherals**: RMT (32 MHz), SPI Slave, UART
-- **Role**: BLE interface, remote LED control, AT command slave
+- **CPU**: Xtensa dual-core, up to 240 MHz
+- **BLE**: Bluetooth 5.0 (Dual Mode - BLE + Classic)
+- **Memory**: 4MB Flash, 520KB SRAM
+- **Peripherals**: RMT (40 MHz), SPI Slave, UART, NeoPixelBus
+- **Role**: BLE interface, 4-channel LED control, AT command slave
 
-### ESP32-H2 GPIO Pin Assignments
+### ESP32 WROOM GPIO Pin Assignments
 
 #### Inter-MCU Communication (UART)
 | GPIO | Function | Description |
@@ -88,15 +111,19 @@ The ESP32-H2 functions as a dedicated LED processor and BLE interface, handling 
 | 11 | SPI MOSI | Pixel data from C5 |
 | 25 | SPI Chip Select | Frame sync from C5 |
 
-#### LED Output (RMT Channels)
+#### LED Output (RMT Channels via NeoPixelBus)
 | GPIO | Function | Description |
 |------|----------|-------------|
-| 27 | RMT Channel 2 | LED Strip Output Ch-2 |
-| 26 | RMT Channel 3 | LED Strip Output Ch-3 |
+| Configurable | RMT Channel 0 | LED Strip Output Ch-0 (RGB/RGBW) |
+| Configurable | RMT Channel 1 | LED Strip Output Ch-1 (RGB/RGBW) |
+| Configurable | RMT Channel 2 | LED Strip Output Ch-2 (RGB/RGBW) |
+| Configurable | RMT Channel 3 | LED Strip Output Ch-3 (RGB/RGBW) |
 
-**RMT Configuration:**
-- **Resolution**: 32 MHz for precise WS2812 timing
-- **Channels**: 2 and 3 (remote LED strips)
+**NeoPixelBus Configuration:**
+- **Resolution**: 40 MHz RMT clock for precise WS2812/SK6812 timing
+- **Channels**: All 4 channels (0-3) allocated dynamically based on AT+LED_PREP command
+- **Protocols**: WS2812 (RGB, 3 bytes/pixel) and SK6812 (RGBW, 4 bytes/pixel)
+- **Memory**: Type-erased strip management for efficient memory usage
 
 ---
 
@@ -106,8 +133,8 @@ The ESP32-H2 functions as a dedicated LED processor and BLE interface, handling 
 The two MCUs are connected via high-speed parallel interface and UART:
 
 ```
-ESP32-C5 (Master)           ESP32-H2 (Slave)
-─────────────────           ─────────────────
+ESP32-C5 (Master)           ESP32 WROOM (Slave)
+─────────────────           ────────────────────
 GPIO 10 (ParlIO CLK)  ────► GPIO 10 (SPI SCLK)
 GPIO 26 (ParlIO DATA) ────► GPIO 11 (SPI MOSI)
 GPIO 25 (ParlIO VALID)────► GPIO 25 (SPI CS)
@@ -170,3 +197,133 @@ All pin assignments can be modified via:
 - **GPIO 25 Usage**: Assigned to WLED Channel 4 as placeholder (WLED requires a pin assignment but this pin is not used for LED output)
 - **ParlIO Override**: GPIO 25 is hardcoded in ParlIO implementation as VALID signal, regardless of WLED Channel 4 initialization
 - **Pin Manager**: WLED pin manager automatically configures ParlIO data pin (GPIO 26) based on 3rd LED output selection
+
+---
+
+## Watts Power Board
+
+### Overview
+The Watts Power Board is an I2C-based power monitoring and management system that provides real-time current, voltage, power, and temperature monitoring for all 4 LED channels, plus automatic overcurrent protection and W5500 ethernet controller reset management.
+
+### I2C Device Topology
+
+| Device | I2C Address | Function | Channels |
+|--------|-------------|----------|----------|
+| **TCA9555 I/O Expander** | 0x21 | Power board GPIO control, W5500 reset | - |
+| **INA237 Power Monitor 1** | 0x40 | Current/voltage/power/temp sensing | Channel 0 |
+| **INA237 Power Monitor 2** | 0x44 | Current/voltage/power/temp sensing | Channel 1 |
+| **INA237 Power Monitor 3** | 0x48 | Current/voltage/power/temp sensing | Channel 2 |
+| **INA237 Power Monitor 4** | 0x4C | Current/voltage/power/temp sensing | Channel 3 |
+| **Main Board Expander** | 0x20 | System GPIO (reserved) | - |
+| **STM32 Slave** | 0x50 | A3942 motor driver control (optional) | 4 channels |
+
+**Connection to ESP32-C5:**
+- **SDA**: GPIO 7
+- **SCL**: GPIO 9
+- **Frequency**: 100 kHz
+- **Access Pattern**: Serialized via FreeRTOS I2C worker task
+
+### Hardware Features
+
+#### INA237 Power Monitors (4× channels)
+- **Current Range**: ±16A per channel
+- **Current Resolution**: 0.1 mA
+- **Voltage Range**: 0-85V bus voltage
+- **Voltage Resolution**: 1 mV
+- **Temperature**: On-die sensor, 1°C resolution
+- **Overcurrent Detection**: Hardware ALERT pin with configurable threshold
+
+#### TCA9555 I/O Expander
+- **GPIO Pins**: 16 programmable I/O
+- **W5500 Reset Control**: Dedicated GPIO for ethernet controller reset
+- **ALERT Monitoring**: Reads overcurrent ALERT signals from INA237 monitors
+- **Configuration**: Input/output direction per pin, polarity inversion
+
+#### STM32 Slave (Optional)
+- **A3942 Control**: 4-channel H-bridge motor driver control for LED outputs
+- **Fault Monitoring**: Open load, short to ground, short to battery, overtemperature
+- **Enable/Disable**: Per-channel and global output control
+- **Fault Clearing**: Automatic and manual fault flag clearing
+
+### Power Monitoring Capabilities
+
+**Measured Parameters:**
+- **Current (mA)**: Real-time LED strip current draw per channel
+- **Voltage (mV)**: Bus voltage monitoring
+- **Power (mW)**: Calculated from I × V
+- **Temperature (°C)**: INA237 die temperature
+- **Alert Flags**: Overcurrent, undervoltage, overvoltage, temperature warnings
+
+**Update Rate:**
+- **Monitor Task**: 50ms polling interval (20 Hz)
+- **Snapshot**: Cached measurements with mutex protection
+- **Direct Read**: On-demand I2C transaction
+
+### Automatic Overcurrent Protection
+
+The power board implements intelligent overcurrent detection and automatic clearing:
+
+**Detection:**
+- INA237 ALERT pin monitoring every 50ms
+- Hardware threshold configured at initialization
+- Latched overcurrent mask (bit 0-3 for channels 0-3)
+
+**Clearing Sequence:**
+1. Wait 5 seconds (configurable) after detection
+2. Read INA237 DIAG_ALERT register (clears software latch)
+3. Send STM32 clear command (clears A3942 hardware fault)
+4. Poll ALERT pin for 1 second to verify stability
+5. If failed, retry every 60 seconds (configurable) up to 10 attempts (configurable)
+
+**Logging:**
+- All overcurrent events logged with ESP_LOG
+- Clear success/failure tracked
+- A3942 fault states decoded and displayed
+
+### W5500 Ethernet Integration
+
+The power board controls the W5500 ethernet controller's reset line:
+
+**Reset Sequence:**
+1. Set RESET pin LOW via TCA9555 GPIO
+2. Wait 10ms
+3. Set RESET pin HIGH
+4. Wait 100ms for W5500 boot completion
+
+**W5500 SPI Connection (to ESP32-C5):**
+- **MISO**: GPIO 5
+- **MOSI**: GPIO 6
+- **SCK**: GPIO 4
+- **CS**: GPIO 12
+- **RST**: Controlled via power board TCA9555
+- **INT**: Not connected (polling mode)
+- **Frequency**: 8 MHz
+
+### Thread Safety
+
+All power board I2C operations are thread-safe via FreeRTOS worker task pattern:
+
+**I2C Worker Task:**
+- Dedicated task serializes all I2C transactions
+- Queue-based operation submission
+- Binary semaphore for completion signaling
+- Prevents bus contention from multiple tasks
+
+**Mutex Protection:**
+- Snapshot data protected by mutex
+- Safe concurrent reads from multiple contexts
+
+### LED Auto-Detection Integration
+
+The power board enables WLED to automatically detect LED types based on current signatures:
+
+**Detection Process:**
+1. Set all pixels to known color (e.g., white)
+2. Sample current on all 4 channels
+3. Classify based on current draw:
+   - High current (>500mA) → RGBW strip detected
+   - Medium current (200-500mA) → RGB strip detected
+   - Low current (<200mA) → No strip or disconnected
+4. Configure NeoPixelBus instances accordingly
+
+See [power-board.mdx](power-board.mdx) for complete API reference and usage examples.

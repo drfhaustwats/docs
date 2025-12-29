@@ -15,30 +15,40 @@ The Watts v3 controller implements a sophisticated dual-MCU topology that separa
 +-------------------------------------------------------------+
 |                      ESP32-C5 (Main)                        |
 |  • WLED Effects Engine (Arduino component)                  |
-|  • Wi-Fi 2.4 / 5 GHz STA/AP                                 |
+|  • Wi-Fi 2.4 / 5 GHz STA/AP + Ethernet (W5500)              |
 |  • ParlIO TX 1-bit @ 80 MHz + VALID pin → pixel stream      |
 |  • RMT-TX Channel 0,1 → Local LED Strips                    |
 |  • AT-Host task over UART0                                  |
+|  • I2C Master → Watts Power Board                           |
 +-----------------------▲-------------------------------------+
-                        | 40 MHz ParlIO (DATA / CLK / VALID)
-                        | Frame-select header + Ch-2/3 pixels
+                        | 80 MHz ParlIO (DATA / CLK / VALID)
+                        | Frame-select header + Ch-0/1/2/3 pixels
 +-----------------------▼-------------------------------------+
-|                      ESP32-H2 (Secondary)                   |
+|                    ESP32 WROOM (Secondary)                  |
 |  • AT-Firmware Core (NimBLE + Parser)                       |
 |  • BLE 5.2 Peripheral                                       |
 |  • ParlIO/SPI-Slave DMA RX                                  |
-|  • RMT-TX Channel 2,3 → Remote LED Strips                   |
+|  • RMT-TX Channel 0,1,2,3 → All 4 LED Strips                |
++-------------------------------------------------------------+
+                        ▼
++-------------------------------------------------------------+
+|                   Watts Power Board (I2C)                   |
+|  • 4× INA237 Power Monitors (current/voltage/temp)          |
+|  • STM32 Slave (A3942 motor driver control)                 |
+|  • TCA9555 I/O Expander (W5500 reset, GPIO)                 |
+|  • Automatic overcurrent protection & clearing              |
 +-------------------------------------------------------------+
 ```
 
 ## MCU Role Separation
 
-| Responsibility | ESP32-C5 (Main) | ESP32-H2 (Secondary) |
+| Responsibility | ESP32-C5 (Main) | ESP32 WROOM (Secondary) |
 |---|---|---|
-| **LED Channels** | Ch-0, Ch-1 (RMT-TX) | Ch-2, Ch-3 (RMT-TX) |
-| **Effects Engine** | WLED renders full RGB frame | Mirrors pixel data |
+| **LED Channels** | Ch-0, Ch-1 (local RMT-TX) | Ch-0, Ch-1, Ch-2, Ch-3 (all RMT-TX) |
+| **Effects Engine** | WLED renders full 4-channel frame | Mirrors pixel data |
 | **Pixel Transport** | ParlIO TX, 80 MHz + VALID | ParlIO/SPI-Slave DMA RX |
-| **Network Stack** | Wi-Fi 2.4/5 GHz, mDNS, HTTP(S) OTA | BLE (GAP + GATT) |
+| **Network Stack** | Wi-Fi 2.4/5 GHz, Ethernet (W5500) | BLE (GAP + GATT) |
+| **Power Monitoring** | I2C master for power board | N/A |
 | **AT Protocol Role** | Master / Host | Slave / Device |
 
 ## Key Features
@@ -48,10 +58,17 @@ The Watts v3 controller implements a sophisticated dual-MCU topology that separa
 - **Frame-locked rendering** with acknowledgment protocol
 - **80 MHz ParlIO** high-speed inter-MCU communication
 
-### Dual Network Interfaces
+### Triple Network Interfaces
 - **Wi-Fi Control**: Full WLED web interface, REST API, and UDP sync
+- **Ethernet Control**: Wired W5500 connection for reliable network access
 - **BLE Control**: Low-power mobile control for basic operations
 - **Seamless Handoff**: Configurations synchronized between interfaces
+
+### Integrated Power Management
+- **4-Channel Power Monitoring**: Real-time current, voltage, power, and temperature sensing via INA237
+- **Automatic Overcurrent Protection**: Intelligent detection and clearing with configurable retry logic
+- **A3942 Motor Driver Control**: STM32-based LED driver management with fault monitoring
+- **LED Auto-Detection**: Automatic RGB/RGBW detection based on current signatures
 
 ### Arduino Component Integration
 Built on proven Arduino ecosystem components:
