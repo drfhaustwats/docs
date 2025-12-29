@@ -20,7 +20,7 @@ The ESP32 WROOM serves as the secondary controller in the Watts v3 dual-MCU syst
 | **OTA** | [ota.c](src/ESP32%20Wroom%20LED%20Driver%20firmware/main/ota.c) / [ota.h](src/ESP32%20Wroom%20LED%20Driver%20firmware/main/ota.h) | Over-the-air update support |
 | **Pin Mapping** | [pins.h](src/Watts-ESP-IDF-C5/components/pins/include/pins/pins.h) | Shared pin definitions |
 
-**Target:** ESP32 (classic WROOM module) - `CONFIG_IDF_TARGET="esp32"` ([sdkconfig.defaults:255](src/ESP32%20Wroom%20LED%20Driver%20firmware/sdkconfig.defaults#L255))
+**Target:** ESP32 (classic WROOM module) - `CONFIG_IDF_TARGET="esp32"` (see `sdkconfig.defaults`)
 
 ## Architecture Overview
 
@@ -135,37 +135,29 @@ void app_main(void) {
    }
    ```
 
-2. **spi_recv_task** (Priority 12, 4KB stack):
+2. **spi_rx_task** (Priority 12, 16KB stack):
    ```cpp
-   void spi_recv_task(void *arg) {
-       for (;;) {
-           spi_slave_transaction_t *rtrans;
-           if (spi_slave_get_trans_result(SPI_HOST, &rtrans, portMAX_DELAY) == ESP_OK) {
-               uint8_t *frame_buf = (uint8_t*)rtrans->rx_buffer;
-               xQueueSend(controller->frame_queue, &frame_buf, 0);
+   static void spi_rx_task(void *param) {
+       led_controller_t *ctrl = (led_controller_t*)param;
+       spi_slave_transaction_t t;
+
+       while (1) {
+           // Wait for SPI transaction
+           esp_err_t ret = spi_slave_transmit(SPI_HOST, &t, portMAX_DELAY);
+           if (ret == ESP_OK) {
+               // Process received frame
+               process_led_frame(ctrl, t.rx_buffer, t.trans_len);
            }
        }
    }
    ```
 
-3. **led_update_task** (Priority 12, 4KB stack):
-   ```cpp
-   void led_update_task(void *arg) {
-       uint8_t *frame_buffer;
-       while (xQueueReceive(controller->frame_queue, &frame_buffer, portMAX_DELAY)) {
-           process_led_frame(frame_buffer);
-           // Re-queue buffer for next reception
-           spi_slave_queue_trans(SPI_HOST, &trans_desc, portMAX_DELAY);
-       }
-   }
-   ```
-
-4. **ble_host_task** (NimBLE managed):
+3. **ble_host_task** (NimBLE managed):
    - Runs `nimble_port_run()`
    - Handles BLE stack operations
    - Managed by NimBLE FreeRTOS integration
 
-5. **heartbeat_timer** (ESP Timer - 10 second interval):
+4. **heartbeat_timer** (ESP Timer - 10 second interval):
    ```cpp
    static void heartbeat_timer_callback(void* arg) {
        if (h2_system_initialized) {
@@ -276,7 +268,7 @@ This automatic state reporting allows the C5 to detect WROOM reboots and automat
 
 **Initialization Flow:**
 ```cpp
-// File: main/ble_at_handler.c - Line 281
+// File: main/ble_at_handler.c
 static bool ble_initialized = false;
 
 cat_return_state at_cmd_bleinit(const struct cat_command *cmd,
@@ -316,7 +308,7 @@ cat_return_state at_cmd_bleinit(const struct cat_command *cmd,
 
 **Service Table Structure:**
 ```cpp
-// File: main/gatt_svc.h - Lines 18-43
+// File: main/gatt_svc.h
 typedef struct {
     struct ble_gatt_svc_def *svc_def;   // NimBLE service definition
     struct ble_gatt_chr_def *chr_defs;  // Characteristic definitions
@@ -779,40 +771,30 @@ void spi_receive_task() {
 
 ### RMT LED Output
 
-**RMT Channel Configuration:**
+The controller uses **NeoPixelBus** library with RMT backend for LED output. NeoPixelBus handles all RMT timing automatically for WS2812/SK6812 protocols.
+
+**Strip Factory (from spi_led_controller.cpp):**
 ```cpp
-// File: main/spi_led_controller.c
-rmt_tx_channel_config_t tx_config = {
-    .clk_src = RMT_CLK_SRC_DEFAULT,
-    .gpio_num = (i == 0) ? RMT_CH2_GPIO : RMT_CH3_GPIO,  // GPIO 27, 26
-    .mem_block_symbols = 48,               // 48 symbols (384 bytes)
-    .resolution_hz = 32000000,             // 32 MHz for precise timing
-    .trans_queue_depth = 8,                // 8 pending transactions
-    .intr_priority = 3,                    // High priority
-    .flags.invert_out = false,             // Normal polarity
-    .flags.with_dma = true                 // Enable DMA
-};
+// RGB strips (WS2812 protocol via RMT)
+static IStrip* make_rgb_strip(int ch, uint16_t pixels, gpio_num_t pin) {
+    switch (ch) {
+        case 0: return new StripWrap<NeoPixelBus<NeoGrbFeature, NeoEsp32Rmt0Ws2812xMethod>>(
+                    new NeoPixelBus<NeoGrbFeature, NeoEsp32Rmt0Ws2812xMethod>(pixels, pin));
+        // ... channels 1-3 use Rmt1/Rmt2/Rmt3 methods
+    }
+}
+
+// RGBW strips (SK6812 protocol via RMT)
+static IStrip* make_rgbw_strip(int ch, uint16_t pixels, gpio_num_t pin) {
+    switch (ch) {
+        case 0: return new StripWrap<NeoPixelBus<NeoGrbwFeature, NeoEsp32Rmt0Sk6812Method>>(
+                    new NeoPixelBus<NeoGrbwFeature, NeoEsp32Rmt0Sk6812Method>(pixels, pin));
+        // ... channels 1-3 use Rmt1/Rmt2/Rmt3 methods
+    }
+}
 ```
 
-**WS2812 Protocol Encoder:**
-```cpp
-// File: main/led_strip_encoder.c - 32MHz timing
-rmt_bytes_encoder_config_t bytes_cfg = {
-    .bit0 = {
-        .duration0 = 10,    // T0H: 312.5ns (10 × 31.25ns)
-        .level0 = 1,        // High level
-        .duration1 = 29,    // T0L: 906.25ns (29 × 31.25ns)  
-        .level1 = 0         // Low level
-    },
-    .bit1 = {
-        .duration0 = 29,    // T1H: 906.25ns (29 × 31.25ns)
-        .level0 = 1,        // High level
-        .duration1 = 10,    // T1L: 312.5ns (10 × 31.25ns)
-        .level1 = 0         // Low level
-    },
-    .flags.msb_first = false  // LSB first for WS2812
-};
-```
+**Note:** For direct RMT usage (parlio_led_controller.c), the resolution is 40MHz for 25ns timing resolution.
 
 **Synchronized Output:**
 ```cpp
@@ -897,7 +879,7 @@ void register_all_commands() {
 
 **AT+LED_PREP Implementation:**
 
-**Source:** [at_led_commands.c:176-233](src/ESP32%20Wroom%20LED%20Driver%20firmware/main/at_led_commands.c#L176-L233)
+**Source:** [at_led_commands.c](src/ESP32%20Wroom%20LED%20Driver%20firmware/main/at_led_commands.c) - `at_cmd_led_prep_spi()` function
 
 **Command Format:** `AT+LED_PREP=<ch0_px>,<ch1_px>,<ch2_px>,<ch3_px>,<ch0_fmt>,<ch1_fmt>,<ch2_fmt>,<ch3_fmt>`
 
@@ -1125,7 +1107,7 @@ esptool.py --port /dev/ttyUSB0 write_flash 0x190000 build/EspAt_firmware.bin
 **Memory Usage:**
 - **RAM**: ~70KB available (after BLE stack and buffers)
 - **Flash**: ~400KB firmware size
-- **Stack**: 8KB (CAT) + 4KB×2 (LED) + 4KB (BLE) = 20KB total
+- **Stack**: 4KB (cat_task) + 16KB (spi_rx_task) + BLE stack = ~24KB total
 
 **Real-time Performance:**
 - **SPI Reception**: 30 MHz, DMA-based, &lt;1% CPU
