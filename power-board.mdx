@@ -427,28 +427,33 @@ watts_stm_clear_fault_flags();
 uint8_t status;
 if (watts_stm_read_status(&status)) {
     if (status & 0x01) Serial.println("Outputs enabled");
-    if (status & 0x80) Serial.println("Fault detected");
+    if (status & 0x02) Serial.println("A3942 fault detected");
+    if (status & 0x10) Serial.println("Overcurrent detected");
 }
 
 // Read per-channel fault codes
 uint8_t fault;
 if (watts_stm_read_fault(2, &fault)) {
-    if (fault & 0x80) Serial.println("CH2: Open Load");
-    if (fault & 0x40) Serial.println("CH2: Short to Ground");
-    if (fault & 0x20) Serial.println("CH2: Short to Battery");
-    if (fault & 0x10) Serial.println("CH2: Overtemperature");
+    if (fault & 0x01) Serial.println("CH2: Short to Ground");
+    if (fault & 0x02) Serial.println("CH2: Short to Battery");
+    if (fault & 0x04) Serial.println("CH2: Open Load");
+    if (fault & 0x08) Serial.println("CH2: Overtemperature Warning");
+    if (fault & 0x10) Serial.println("CH2: CP Undervoltage");
 }
 ```
 
 ### A3942 Fault Decoding
 
+The A3942 fault register uses bits D4:D0 (lower 5 bits). Bits D7:D6 contain the channel address.
+
 | Bit | Mask | Fault Code | Description |
 |-----|------|------------|-------------|
-| 7 | 0x80 | [OL] | Open Load - No LED strip connected |
-| 6 | 0x40 | [STG] | Short to Ground - Output shorted to GND |
-| 5 | 0x20 | [STB] | Short to Battery - Output shorted to V+ |
-| 4 | 0x10 | [OT] | Overtemperature - Thermal shutdown |
-| 3-0 | 0x0F | - | Reserved |
+| D0 | 0x01 | [STG] | Short to Ground - Output shorted to GND |
+| D1 | 0x02 | [STB] | Short to Battery - Output shorted to V+ |
+| D2 | 0x04 | [OL] | Open Load - No LED strip connected |
+| D3 | 0x08 | [TWARN] | Overtemperature Warning |
+| D4 | 0x10 | [CP_UVLO] | Charge Pump Undervoltage Lockout |
+| D7:D6 | 0xC0 | - | Channel address (0-3) |
 
 The monitor task automatically logs fault state changes:
 
@@ -736,14 +741,22 @@ for (uint8_t i = 0; i < 4; i++) {
 ```
 
 **Threshold Calculation:**
-```
-5A Mode: oc_threshold = 10000 (raw INA237 units)
-8A Mode: oc_threshold = 16000 (raw INA237 units)
 
-Current scaling: 305µA/LSB (from calibration)
-5A threshold: 10000 × 0.305mA = 3050mA = 3.05A
-8A threshold: 16000 × 0.305mA = 4880mA = 4.88A
+The SOVL register uses **shunt voltage threshold** (not current directly). With ADCRANGE=0, the LSB is 5 µV:
+
 ```
+SOVL Formula: Threshold Current = (raw × 5µV) / R_shunt
+
+5A Mode: oc_threshold = 10000
+  → Shunt voltage: 10000 × 5µV = 50mV
+  → Current threshold: 50mV / 10mΩ = 5.0A
+
+8A Mode: oc_threshold = 16000
+  → Shunt voltage: 16000 × 5µV = 80mV
+  → Current threshold: 80mV / 10mΩ = 8.0A
+```
+
+Note: The Current LSB (305µA) is used for current register readings, not for SOVL threshold configuration.
 
 ### Hardware Connections
 
