@@ -31,6 +31,13 @@
             ]
           },
           {
+            "group": "Advanced Features",
+            "pages": [
+              "ota-firmware-updates",
+              "led-detection"
+            ]
+          },
+          {
             "group": "Customization",
             "pages": [
               "essentials/settings",

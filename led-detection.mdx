@@ -1,0 +1,504 @@
+---
+title: "LED Auto-Detection"
+description: "Automatic LED strip detection using power board current measurement and binary search algorithm"
+---
+
+# LED Auto-Detection
+
+The Watts v3 system includes an intelligent LED auto-detection feature that automatically discovers the number of LEDs connected to each channel using power consumption analysis. This eliminates manual configuration and ensures accurate LED counts.
+
+## Overview
+
+The detection system uses the Watts Power Board's current measurement capabilities to:
+
+1. Measure baseline current (all LEDs off)
+2. Light a single LED and measure current delta
+3. Binary search to find the highest LED index that responds
+4. Apply detected configuration to WLED
+
+**Key Capabilities:**
+- Detects up to 1,000 LEDs per channel
+- Supports both RGB (WS2812) and RGBW (SK6812) strips
+- Power injection detection (LEDs powered from multiple channels)
+- Automatic configuration update and persistence
+
+---
+
+## Detection Algorithm
+
+### Step 1: Baseline Measurement
+
+All LEDs are turned off (black frame sent twice to ensure LEDs are off), then current is measured across all 4 power channels:
+
+```cpp
+baseline_per_ch[4] = {0, 0, 0, 0};
+baseline_total = sum(baseline_per_ch);  // Typically 50-200mA
+```
+
+### Step 2: Single LED Test
+
+LED[0] is set to test color (brightness 0x80 = 50% white), then current is measured again:
+
+```cpp
+setPixelInBuffer(buffer, 0, elementSize,
+                 TEST_BRIGHTNESS, TEST_BRIGHTNESS, TEST_BRIGHTNESS,
+                 (elementSize == 4) ? TEST_BRIGHTNESS : 0);
+
+led0_per_ch[4] = measure_current();
+delta_mA = sumPositiveDeltas(led0_per_ch, baseline_per_ch);
+```
+
+**Threshold Calculation:**
+The detection threshold is dynamically calculated from the single LED delta:
+
+```cpp
+delta_cap = clamp(led0_delta, 3, 10);  // 3-10 mA threshold
+threshold_total = baseline_total + delta_cap;
+```
+
+**Why Dynamic Threshold?**
+- RGB LEDs: Lower current (~6-9mA at 50% brightness)
+- RGBW LEDs: Higher current (~12-15mA at 50% brightness)
+- Power injection: Delta may appear on multiple channels
+
+### Step 3: Binary Search
+
+A binary search finds the highest responding LED index:
+
+```cpp
+int lo = 1;
+int hi = LED_DETECT_MAX_LEDS;  // 1000
+int last_yes = 0;
+
+while (lo <= hi) {
+    int mid = lo + (hi - lo) / 2;
+
+    if (probe_led(mid)) {  // LED responds (current > threshold)
+        last_yes = mid;
+        lo = mid + 1;       // Search higher
+    } else {
+        hi = mid - 1;       // Search lower
+    }
+}
+
+detected_count = last_yes + 1;
+```
+
+**Probe Function:**
+For each tested index, set that LED to test color and measure total current:
+
+```cpp
+bool probe_led(int idx) {
+    setPixelInBuffer(buffer, idx, elementSize, 0x80, 0x80, 0x80, 0x80);
+    manager.markChannelDirty(data_channel);
+    push_frame_and_wait(10, 10);  // Wait for LEDs to update
+
+    int32_t cur_total = measure_current();
+    return (cur_total >= threshold_total);
+}
+```
+
+**Search Complexity:**
+- Maximum probes: log₂(1000) ≈ 10 tests
+- Total detection time: ~2-3 seconds per channel
+
+---
+
+## Power Injection Handling
+
+When LED strips are powered from multiple channels (power injection), the current delta may appear across multiple power channels, not just the data channel.
+
+**Example:**
+- Data Channel: CH0
+- Power Channels: CH0 + CH1 (power injection at midpoint)
+
+**Detection Behavior:**
+```
+Baseline:
+  CH0: 100mA
+  CH1: 120mA
+  Total: 220mA
+
+LED[0] On:
+  CH0: 106mA  (+6mA)
+  CH1: 123mA  (+3mA)
+  Total: 229mA (+9mA)
+```
+
+The `sumPositiveDeltas()` function sums deltas from **all channels** (not just the data channel):
+
+```cpp
+int32_t sumPositiveDeltas(const int32_t current[4], const int32_t baseline[4]) {
+    int32_t delta = 0;
+    for (int i = 0; i < 4; i++) {
+        int32_t d = current[i] - baseline[i];
+        if (d > 0) delta += d;
+    }
+    return delta;
+}
+```
+
+This ensures accurate detection regardless of power injection topology.
+
+---
+
+## Multi-Channel Detection
+
+The system swaps **all 4 channels** to test buffers during detection, ensuring no interference from other channels:
+
+```cpp
+for (uint8_t ch = 0; ch < 4; ch++) {
+    if (manager.isChannelRegistered(ch)) {
+        uint8_t *newBuf = (ch == data_channel) ? testBuffer : blackBuffer;
+        manager.swapChannelBuffer(ch, LED_DETECT_MAX_LEDS, newBuf, bufSize, &savedAll[ch]);
+    }
+}
+```
+
+**Why Swap All Channels?**
+- Prevents other channels from drawing current during detection
+- Ensures clean baseline measurement
+- Avoids false positives from adjacent channels
+
+After detection completes, all channel buffers are restored:
+
+```cpp
+for (uint8_t ch = 0; ch < 4; ch++) {
+    if (swappedAll[ch]) {
+        manager.restoreChannelBuffer(ch, savedAll[ch]);
+    }
+}
+```
+
+---
+
+## Configuration Application
+
+After successful detection, the result is applied to WLED bus configuration:
+
+```cpp
+bool led_detect_apply_result(uint8_t channel, uint16_t ledCount) {
+    Bus *bus = busses.getBus(channel);
+
+    // Preserve existing bus settings
+    uint8_t pins[5];
+    bus->getPins(pins);
+    uint8_t ledType = bus->getType();
+    uint8_t colorOrder = bus->getColorOrder();
+
+    // Update only LED count
+    busConfigs[channel] = new BusConfig(
+        ledType, pins, start, ledCount, colorOrder,
+        reversed, skipFirst, AWmode, freq, 1, ledCount, 24
+    );
+
+    doInitBusses = true;        // Trigger bus reinitialization
+    doSerializeConfig = true;   // Save to persistent config
+}
+```
+
+**Important:** All other bus parameters (type, pins, color order) are preserved. Only the LED count is updated.
+
+---
+
+## API Reference
+
+### led_detect_run
+
+```cpp
+LedDetectResult led_detect_run(uint8_t data_channel,
+                               uint8_t data_type = 30,
+                               uint8_t power_mask = 0x0F);
+```
+
+Run detection on a single channel.
+
+**Parameters:**
+- `data_channel`: Channel to detect (0-3)
+- `data_type`: LED type (30 = SK6812 RGBW, 22 = WS2812 RGB)
+- `power_mask`: Bitmask of power channels to measure (default: 0x0F = all 4)
+
+**Returns:** `LedDetectResult` struct
+
+**Example:**
+```cpp
+// Detect channel 0 (RGBW), measure all power channels
+LedDetectResult result = led_detect_run(0, 30, 0x0F);
+
+if (result.success) {
+    ESP_LOGI(TAG, "CH%d: %d LEDs detected", result.channel, result.detected_count);
+    ESP_LOGI(TAG, "Baseline: %ld mA, Delta: %ld mA",
+             result.baseline_mA, result.delta_mA);
+
+    // Apply to WLED configuration
+    led_detect_apply_result(result.channel, result.detected_count);
+} else {
+    ESP_LOGE(TAG, "Detection failed: %s", result.error);
+}
+```
+
+---
+
+### led_detect_run_all
+
+```cpp
+LedDetectAllResult led_detect_run_all();
+```
+
+Run detection on all configured channels.
+
+**Returns:** `LedDetectAllResult` struct
+
+**Example:**
+```cpp
+LedDetectAllResult allResults = led_detect_run_all();
+
+ESP_LOGI(TAG, "Tested %d channels", allResults.channels_tested);
+
+for (uint8_t ch = 0; ch < 4; ch++) {
+    if (allResults.channels[ch].success) {
+        ESP_LOGI(TAG, "CH%d: %d LEDs", ch, allResults.channels[ch].detected_count);
+    }
+}
+```
+
+---
+
+### led_detect_is_running
+
+```cpp
+bool led_detect_is_running();
+```
+
+Check if detection is currently running.
+
+**Returns:** `true` if detection in progress
+
+---
+
+## Data Structures
+
+### LedDetectResult
+
+```cpp
+struct LedDetectResult {
+    uint8_t channel;           // Data channel tested (0-3)
+    uint16_t detected_count;   // Number of LEDs found
+    uint8_t led_type;          // LED type from bus config
+    int32_t baseline_mA;       // Total baseline current (sum of all 4 channels)
+    int32_t single_led_mA;     // Total current with LED[0] on
+    int32_t delta_mA;          // Sum of positive deltas across all channels
+    bool success;              // Detection succeeded
+    char error[64];            // Error message if failed
+};
+```
+
+### LedDetectAllResult
+
+```cpp
+struct LedDetectAllResult {
+    LedDetectResult channels[4];  // Per-channel results
+    uint8_t channels_tested;      // Number of channels tested
+    bool success;                 // All tests succeeded
+};
+```
+
+---
+
+## Detection Parameters
+
+These constants are defined in [led_detect.cpp](src/Watts-ESP-IDF-C5/components/wled/led_detect.cpp#L12-L17):
+
+```cpp
+static const uint8_t TEST_BRIGHTNESS = 0x80;         // 50% brightness for test
+static const int32_t MIN_DELTA_MA = 5;               // Minimum detectable delta
+static const int32_t MAX_THRESHOLD_DELTA = 10;       // Max threshold cap
+static const int32_t MIN_THRESHOLD_DELTA = 3;        // Min threshold cap
+static const uint32_t LED_DETECT_SETTLE_MS = 100;    // LED settle time
+static const uint16_t LED_DETECT_MAX_LEDS = 1000;    // Maximum LEDs per channel
+```
+
+**Tuning Guidelines:**
+- `TEST_BRIGHTNESS`: Higher values increase delta but may cause false positives
+- `MIN_DELTA_MA`: Lower threshold allows detection of low-power LEDs
+- Settle time: Increase if LEDs have slow PWM response
+
+---
+
+## MQTT Integration
+
+Detection can be triggered via MQTT command (implementation in WLED):
+
+```json
+{
+  "command": "detectLEDs",
+  "channel": 0
+}
+```
+
+**All Channels:**
+```json
+{
+  "command": "detectLEDs",
+  "channel": "all"
+}
+```
+
+**Response (published to status topic):**
+```json
+{
+  "status": "detection_complete",
+  "channel": 0,
+  "count": 150,
+  "baseline_mA": 180,
+  "delta_mA": 8
+}
+```
+
+---
+
+## Troubleshooting
+
+### Detection Returns 0 LEDs
+
+**Symptom:** `detected_count = 0`, error: "No measurable LED[0] delta"
+
+**Causes:**
+- LEDs not powered (check power supply)
+- Power board not connected or initialized
+- Current delta below `MIN_DELTA_MA` threshold
+- Wrong power channel mask (LEDs powered by excluded channel)
+
+**Solutions:**
+- Verify power supply voltage (5V for WS2812/SK6812)
+- Check power board I2C connection (GPIO 7/9)
+- Verify `watts_power_begin()` succeeded
+- Use power mask `0x0F` (all channels) for first test
+
+---
+
+### Detected Count Too Low
+
+**Symptom:** Detection stops at 50 LEDs when 150 are connected
+
+**Causes:**
+- Power injection not detected (current appears on wrong channel)
+- Threshold too high (large LEDs saturate threshold)
+- Voltage drop along strip (far LEDs don't light)
+
+**Solutions:**
+- Use full power mask `0x0F` to capture all channels
+- Check voltage at end of strip (should be >4.5V)
+- Add power injection at strip midpoint
+- Verify data signal integrity with oscilloscope
+
+---
+
+### False Positives (Count Too High)
+
+**Symptom:** Detection reports 2000 LEDs when only 100 are connected
+
+**Causes:**
+- Threshold too low (noise triggers detection)
+- Other devices drawing current on same power channel
+- LED strip has excessive idle current
+
+**Solutions:**
+- Increase `MIN_THRESHOLD_DELTA` from 3mA to 5mA
+- Isolate LED strips on dedicated power channels
+- Check for power board current measurement errors
+
+---
+
+### Detection Takes Too Long
+
+**Symptom:** Detection takes >10 seconds per channel
+
+**Causes:**
+- High `LED_DETECT_MAX_LEDS` value (1000 LEDs)
+- Excessive settle time `LED_DETECT_SETTLE_MS`
+- Slow I2C communication with power board
+
+**Solutions:**
+- Reduce `LED_DETECT_MAX_LEDS` if fewer LEDs expected
+- Decrease `LED_DETECT_SETTLE_MS` from 100ms to 50ms
+- Verify I2C frequency is 100kHz (not 10kHz)
+
+---
+
+## Integration Example
+
+### Detect and Apply Configuration
+
+```cpp
+#include "led_detect.h"
+#include "watts_power_board.h"
+
+void detectAndConfigure(uint8_t channel) {
+    // Ensure power board is initialized
+    if (!watts_power_is_present()) {
+        ESP_LOGE(TAG, "Power board not available");
+        return;
+    }
+
+    // Suspend WLED strip service during detection
+    suspendStripService = true;
+
+    // Run detection
+    LedDetectResult result = led_detect_run(channel, 30, 0x0F);
+
+    if (result.success && result.detected_count > 0) {
+        ESP_LOGI(TAG, "CH%d: %d LEDs detected (baseline=%ld mA, delta=%ld mA)",
+                 channel, result.detected_count,
+                 result.baseline_mA, result.delta_mA);
+
+        // Apply to WLED configuration
+        led_detect_apply_result(channel, result.detected_count);
+
+        // Configuration will be saved automatically (doSerializeConfig = true)
+    } else {
+        ESP_LOGE(TAG, "CH%d detection failed: %s", channel, result.error);
+    }
+
+    // Resume WLED strip service
+    suspendStripService = false;
+}
+```
+
+### Detect All Channels on Startup
+
+```cpp
+void setup() {
+    // Initialize power board
+    watts_probe_result_t probe;
+    if (!watts_power_begin(NULL, &probe)) {
+        ESP_LOGW(TAG, "Power board not detected, auto-detection disabled");
+        return;
+    }
+
+    // Run detection on all channels
+    LedDetectAllResult results = led_detect_run_all();
+
+    ESP_LOGI(TAG, "Auto-detection complete: %d channels tested",
+             results.channels_tested);
+
+    for (uint8_t ch = 0; ch < 4; ch++) {
+        if (results.channels[ch].success) {
+            ESP_LOGI(TAG, "  CH%d: %d LEDs", ch, results.channels[ch].detected_count);
+            led_detect_apply_result(ch, results.channels[ch].detected_count);
+        }
+    }
+
+    // Trigger bus reinitialization with new counts
+    // (doInitBusses flag already set by led_detect_apply_result)
+}
+```
+
+---
+
+## See Also
+
+- [Power Board](power-board.mdx) - Current measurement system
+- [Power Board API](api-reference/power-board-api.mdx) - Power monitoring functions
+- [Hardware & Pinouts](hardware.mdx#watts-power-board) - Power board I2C connection
+- [WLED Integration](esp32-c5-implementation.mdx#wled-integration) - Bus configuration

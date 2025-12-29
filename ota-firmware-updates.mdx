@@ -1,0 +1,475 @@
+---
+title: "OTA Firmware Updates"
+description: "Over-the-Air firmware update system for both ESP32-C5 and ESP32 WROOM via MQTT and HTTP"
+---
+
+# OTA Firmware Updates
+
+The Watts v3 system supports Over-the-Air (OTA) firmware updates for both the ESP32-C5 main controller and the ESP32 WROOM secondary controller. Updates are triggered via MQTT commands and delivered over HTTP from a firmware server.
+
+## System Overview
+
+The OTA system implements two distinct update paths:
+
+```
+MQTT Command → Firmware Server (HTTP) → Target MCU
+     │
+     ├─► updateFirmware → ESP32-C5 (standard ESP32 OTA)
+     │
+     └─► updateH2Firmware → ESP32 WROOM via UART transfer
+```
+
+### Key Features
+
+- **MQTT-Triggered Updates**: Remote firmware deployment via MQTT commands
+- **Dual-MCU Support**: Independent update paths for C5 and WROOM
+- **Chunked Transfer**: Memory-efficient streaming for large firmware files
+- **MD5 Validation**: Per-chunk and full-firmware integrity verification
+- **Progress Reporting**: Real-time update status via MQTT
+- **Automatic Retry**: Configurable retry logic for failed chunk downloads
+
+---
+
+## ESP32-C5 Firmware Updates
+
+The ESP32-C5 uses the standard ESP32 OTA mechanism with HTTP firmware fetch.
+
+### MQTT Command Format
+
+```json
+{
+  "command": "updateFirmware",
+  "url": "http://firmware-server.local/c5/firmware.bin",
+  "version": "1.2.3"
+}
+```
+
+**Parameters:**
+- `command`: Must be `"updateFirmware"`
+- `url`: HTTP URL to firmware binary
+- `version`: Firmware version string (for logging)
+
+### Update Process
+
+1. **Trigger**: MQTT command received in `mqtt.cpp`
+2. **Fetch**: C5 downloads firmware via HTTP
+3. **Validate**: MD5 checksum verification
+4. **Flash**: OTA partition written via ESP-IDF OTA API
+5. **Reboot**: Automatic reboot to new firmware
+
+### Status Reporting
+
+Update progress is published via `sendUpdateStatus()`:
+
+```
+"Fetching firmware..."
+"Writing firmware: 45%"
+"Firmware update complete - rebooting"
+```
+
+---
+
+## ESP32 WROOM Firmware Updates
+
+The ESP32 WROOM update process is more complex due to the inter-MCU communication requirement. The C5 acts as a proxy, downloading firmware chunks and forwarding them to the WROOM via UART.
+
+### MQTT Command Format
+
+```json
+{
+  "command": "updateH2Firmware",
+  "url": "http://firmware-server.local/h2/",
+  "version": "2.0.1"
+}
+```
+
+**Parameters:**
+- `command`: Must be `"updateH2Firmware"`
+- `url`: Base URL to firmware endpoint (without filename)
+- `version`: Firmware version string
+
+**Important**: The URL is a base path. The system appends the C5's MAC address and version to construct the full URL:
+
+```
+http://firmware-server.local/h2/{MAC}/{version}
+```
+
+Example:
+```
+http://192.168.1.100:8080/h2/30EDA0E424A4/2.0.1
+```
+
+### Update State Machine
+
+The WROOM update process follows a 6-state machine defined in [h2_ota.h](src/Watts-ESP-IDF-C5/components/athost/src/h2_ota.h#L14-L22):
+
+```c
+typedef enum {
+    H2_OTA_IDLE,              // Not updating
+    H2_OTA_FETCH_INFO,        // Get firmware metadata from server
+    H2_OTA_SEND_OTA_CMD,      // Send AT+OTAUPDATE to WROOM
+    H2_OTA_DOWNLOAD_CHUNK,    // Download chunk from server
+    H2_OTA_TRANSMIT_CHUNK,    // Send chunk to WROOM via UART
+    H2_OTA_FINALIZE,          // Validate full MD5 and complete
+    H2_OTA_ERROR              // Error state
+} h2_ota_state_t;
+```
+
+### Detailed Update Flow
+
+#### 1. Fetch Firmware Info
+
+**Request to server:**
+```
+GET /h2/{MAC}/{version}?chunksize=10240 HTTP/1.1
+```
+
+**Expected JSON response:**
+```json
+{
+  "length": 1048576,
+  "chunks": 103,
+  "chunkSize": 10240,
+  "md5": "a1b2c3d4e5f6..."
+}
+```
+
+**Chunk Size Calculation:**
+The system calculates chunk size dynamically based on available heap:
+
+```cpp
+uint32_t calculatedChunkSize = (freeHeap / 10) & ~0x3FF;  // 10% of heap, rounded to 1KB
+uint32_t requestedChunkSize = max(calculatedChunkSize, 1024U);
+```
+
+Typical chunk size: **10-20 KB**
+
+#### 2. Send OTA Command to WROOM
+
+The C5 sends an AT command to prepare the WROOM for binary transfer:
+
+```
+AT+OTAUPDATE=10240
+```
+
+**Response:**
+```
+OK
+```
+
+The WROOM:
+- Initializes OTA partition
+- Allocates chunk buffer
+- Enters OTA receive mode
+
+#### 3. UART Binary Stream Sync
+
+After the AT command, the C5 sends a 6-byte sync header to switch from AT mode to binary mode:
+
+```c
+static const uint8_t SYNC_HDR[6] = {0xC0, 0xFF, 0xFE, 0xAA, 0x55, 0x90};
+```
+
+This signals the WROOM to expect raw binary data instead of AT commands.
+
+#### 4. Chunked Firmware Transfer
+
+For each chunk (0 to N-1):
+
+**C5 → Firmware Server:**
+```
+GET /h2/{MAC}/{version}/{chunkIndex}?chunksize=10240 HTTP/1.1
+```
+
+**Server Response:**
+```
+HTTP/1.1 200 OK
+Content-Length: 10240
+Content-MD5: e5f6a7b8c9d0...
+
+[10240 bytes of binary data]
+```
+
+**C5 → WROOM (via UART):**
+```
+[10240 bytes of raw binary data]
+```
+
+**Validation:**
+- Per-chunk MD5 validation (if `Content-MD5` header present)
+- Cumulative MD5 calculation for full firmware
+
+**Special Handling for First Chunk:**
+- After sending first chunk, C5 waits for ACK from WROOM
+- Timeout: 5 seconds
+- Subsequent chunks are sent without waiting for ACK (streaming mode)
+
+#### 5. Finalization
+
+After all chunks transmitted:
+
+1. **C5**: Finalizes cumulative MD5 hash
+2. **C5**: Compares with expected MD5 from firmware info
+3. **WROOM**: Validates OTA partition and reboots to new firmware
+4. **C5**: Publishes completion status via MQTT
+
+### Transfer Performance
+
+**Theoretical Maximum:**
+- UART Baud Rate: 921.6 kbaud = 115.2 KB/s
+- Effective Rate: ~90 KB/s (accounting for protocol overhead)
+
+**Typical 2MB Firmware Update:**
+- Download Time: ~22 seconds
+- Verification Time: ~3 seconds
+- Reboot Time: ~5 seconds
+- **Total Time: ~30 seconds**
+
+### Error Handling
+
+**Retry Logic:**
+- Maximum retries: 20 per chunk (configurable)
+- Retries triggered on:
+  - HTTP error (non-200 response)
+  - Content length mismatch
+  - MD5 validation failure
+  - Connection timeout
+
+**Abort Conditions:**
+- Max retries exceeded
+- UART write failure
+- First chunk ACK timeout (5 seconds)
+- Full firmware MD5 mismatch
+
+### Status Reporting
+
+Progress is reported via MQTT every 5%:
+
+```
+"H2 firmware info retrieved"
+"H2 firmware: 5%"
+"H2 firmware: 10%"
+...
+"H2 firmware: 100%"
+"H2 firmware update complete - H2 will reboot"
+```
+
+Error states:
+```
+"Failed to start H2 update"
+"H2 update failed - max retries"
+"H2 firmware MD5 verification failed"
+```
+
+---
+
+## Firmware Server Requirements
+
+The firmware server must implement the following endpoints:
+
+### 1. Firmware Info Endpoint
+
+**Request:**
+```
+GET /h2/{MAC}/{version}?chunksize={size}
+```
+
+**Response:**
+```json
+{
+  "length": 1048576,
+  "chunks": 103,
+  "chunkSize": 10240,
+  "md5": "a1b2c3d4e5f6a7b8c9d0e1f2a3b4c5d6"
+}
+```
+
+### 2. Chunk Download Endpoint
+
+**Request:**
+```
+GET /h2/{MAC}/{version}/{chunkIndex}?chunksize={size}
+```
+
+**Response:**
+```
+HTTP/1.1 200 OK
+Content-Length: {actual_chunk_size}
+Content-MD5: {chunk_md5_hex}
+
+[binary chunk data]
+```
+
+**Note:** Last chunk may be smaller than `chunkSize`.
+
+---
+
+## API Reference
+
+### h2_ota_start
+
+```c
+bool h2_ota_start(const String& url, const String& version);
+```
+
+Start WROOM firmware update.
+
+**Parameters:**
+- `url`: Base URL to firmware endpoint (e.g., `"http://192.168.1.100:8080/h2/"`)
+- `version`: Firmware version string
+
+**Returns:** `true` if update started successfully
+
+**Example:**
+```cpp
+if (h2_ota_start("http://192.168.1.100:8080/h2/", "2.0.1")) {
+    sendUpdateStatus("Starting H2 firmware update");
+}
+```
+
+---
+
+### h2_ota_in_progress
+
+```c
+bool h2_ota_in_progress(void);
+```
+
+Check if WROOM update is in progress.
+
+**Returns:** `true` if update active
+
+---
+
+### h2_ota_get_state
+
+```c
+h2_ota_state_t h2_ota_get_state(void);
+```
+
+Get current update state.
+
+**Returns:** Current state from `h2_ota_state_t` enum
+
+---
+
+### h2_ota_abort
+
+```c
+void h2_ota_abort(void);
+```
+
+Abort in-progress WROOM update.
+
+---
+
+### processH2OTAStateMachine
+
+```c
+void processH2OTAStateMachine(void);
+```
+
+Advance WROOM OTA state machine (called from main loop).
+
+**Important:** Must be called regularly (e.g., every 100ms) for OTA to progress.
+
+---
+
+## Integration Example
+
+### MQTT Handler (C5)
+
+```cpp
+void handleMqttCommand(const JsonDocument& json_mqtt_payload) {
+    String command = json_mqtt_payload["command"].as<String>();
+
+    if (command == "updateFirmware") {
+        // C5 firmware update
+        firmwareUpdateURL = json_mqtt_payload["url"].as<String>();
+        firmwareUpdateVersion = json_mqtt_payload["version"].as<String>();
+        updateState = FETCH_FIRMWARE_INFO;
+    }
+    else if (command == "updateH2Firmware") {
+        // WROOM firmware update
+        String url = json_mqtt_payload["url"].as<String>();
+        String version = json_mqtt_payload["version"].as<String>();
+
+        if (h2_ota_start(url, version)) {
+            sendUpdateStatus("Starting H2 firmware update");
+        } else {
+            sendUpdateStatus("Failed to start H2 update");
+        }
+    }
+}
+```
+
+### Main Loop (C5)
+
+```cpp
+void loop() {
+    // Process WROOM OTA state machine
+    if (h2_ota_in_progress()) {
+        processH2OTAStateMachine();
+    }
+
+    // ... other loop tasks
+}
+```
+
+---
+
+## Troubleshooting
+
+### WROOM Update Fails at First Chunk
+
+**Symptom:** "Timeout waiting for H2 ACK"
+
+**Causes:**
+- WROOM not in OTA mode (check AT+OTAUPDATE response)
+- UART connection issue (check wiring, baud rate)
+- WROOM buffer allocation failure (check free heap)
+
+**Solution:**
+- Verify UART connection: TX(C5 GPIO 6) → RX(WROOM GPIO 3)
+- Check WROOM logs for OTA initialization errors
+- Reduce chunk size if heap is constrained
+
+---
+
+### MD5 Verification Failed
+
+**Symptom:** "H2 firmware MD5 mismatch!"
+
+**Causes:**
+- Network corruption during chunk download
+- Firmware server returned incorrect chunk
+- Cumulative MD5 calculation error
+
+**Solution:**
+- Enable per-chunk MD5 validation (`Content-MD5` headers)
+- Check network stability (retry count in logs)
+- Verify firmware file on server is not corrupted
+
+---
+
+### Update Stalls at Mid-Progress
+
+**Symptom:** Progress stops at 45%, no error message
+
+**Causes:**
+- `processH2OTAStateMachine()` not being called
+- Chunk download timeout (network issue)
+- WROOM UART buffer overflow
+
+**Solution:**
+- Ensure state machine is called in main loop
+- Check WiFi signal strength and stability
+- Monitor WROOM logs for buffer warnings
+
+---
+
+## See Also
+
+- [AT Protocol](at-protocol.mdx) - UART communication specifications
+- [MQTT Integration](development-workflow.mdx#mqtt-testing) - Testing MQTT commands
+- [Troubleshooting](troubleshooting.mdx) - General debugging guide
