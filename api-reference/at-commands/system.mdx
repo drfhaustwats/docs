@@ -9,7 +9,7 @@ System commands handle device control, debugging, and over-the-air firmware upda
 
 ## AT+RST
 
-Performs a software reset/restart of the ESP32-H2 device.
+Performs a software reset/restart of the ESP32 WROOM device.
 
 ### Request
 ```
@@ -27,7 +27,7 @@ OK
 AT+RST
 OK
 
-# ESP32-H2 will restart within 100ms
+# ESP32 WROOM will restart within 100ms
 # UART connection will be lost temporarily
 ```
 
@@ -47,60 +47,87 @@ OK
 
 ## AT+OTAUPDATE
 
-Initiates firmware update process over UART. The ESP32-H2 enters HOLD state and expects firmware binary data stream.
+Initiates firmware update process over UART. The ESP32 WROOM enters OTA mode and expects chunked binary firmware stream.
+
+<ParamField query="chunk_size" type="integer" required>
+  Chunk size in bytes (256-16384). Typically 4096-10240 bytes based on available heap.
+</ParamField>
 
 ### Request
 ```
-AT+OTAUPDATE
+AT+OTAUPDATE=<chunk_size>
 ```
 
 ### Initial Response
 ```
-HOLD    # Device ready to receive firmware data
+OK    # Device ready to receive firmware data
 ```
 
 ### Firmware Data Protocol
 
-After receiving `HOLD`, the ESP32-C5 sends:
+After receiving `OK`, the ESP32-C5 sends:
 
-1. **Sync Pattern** (8 bytes): `0xA5A5A5A5A5A5A5A5`
-2. **Firmware Size** (4 bytes): Little-endian uint32
-3. **Firmware Data** (size bytes): Raw binary firmware image
-4. **CRC32** (4 bytes): Little-endian checksum
+1. **Sync Header** (6 bytes): `{0xC0, 0xFF, 0xFE, 0xAA, 0x55, 0x90}`
+2. **First Chunk** (chunk_size bytes): Must contain complete firmware header for validation
+3. **ACK Wait**: WROOM validates header and sends `+OTAACK\r\n` after `esp_ota_begin()`
+4. **Remaining Chunks**: Streamed continuously without ACK (fire-and-forget)
+5. **Completion**: 3-second idle timeout triggers `esp_ota_end()` and reboot
 
-### Final Response
+### Success Response
 ```
-OK      # Firmware update successful, device will restart
-ERROR   # Update failed (bad CRC, insufficient space, etc.)
++OTAACK    # First chunk validated successfully
++OTAOK     # Firmware update complete, device will restart
+```
+
+### Error Responses
+```
++OTAERR:1    # SYNC_TIMEOUT: Sync header not received or mismatch
++OTAERR:2    # VERSION_ABORT: Version identical to running or last-invalid
++OTAERR:3    # UART: UART read/write error
++OTAERR:4    # FLASH_WRITE: esp_ota_write() failed
++OTAERR:5    # VALIDATE_FAILED: esp_ota_end() validation failed
++OTAERR:8    # UNKNOWN: Other errors (e.g., buffer allocation failure)
 ```
 
 ### Example
 ```bash
-AT+OTAUPDATE
-HOLD
-
-# ESP32-C5 now streams:
-# [0xA5A5A5A5A5A5A5A5] [size=1048576] [firmware_data...] [crc32]
-
+AT+OTAUPDATE=10240
 OK
-# ESP32-H2 restarts with new firmware
+
+# ESP32-C5 now sends:
+# [6-byte sync: 0xC0 0xFF 0xFE 0xAA 0x55 0x90]
+# [10240 bytes: first chunk with header]
+
++OTAACK    # WROOM validated header and started OTA
+
+# [10240 bytes: chunk 1]
+# [10240 bytes: chunk 2]
+# ... (remaining chunks)
+# [3-second idle timeout]
+
++OTAOK
+# ESP32 WROOM restarts with new firmware
 ```
 
 ### Implementation Details
-- **Timeout**: 30 seconds maximum for entire update process
+- **Chunk Size**: Negotiated via AT command parameter (default: 4096 bytes)
+- **First Chunk Validation**: WROOM checks firmware version and SHA-256 hash
+- **Version Check**: Rejects firmware with same version as running or last-invalid partition
+- **Streaming Mode**: After first chunk ACK, subsequent chunks streamed without acknowledgment
+- **Timeout**: 200ms per chunk read, 3000ms idle timeout for completion
 - **Flash Partition**: Updates OTA partition, switches on next boot
-- **Validation**: CRC32 verification before committing update
 - **Recovery**: Rolls back to previous firmware on boot failure
-- **Size Limit**: Maximum ~1.5MB firmware size (depends on partition table)
 
 ### Error Conditions
 
-| Error | Cause |
-|-------|-------|
-| Sync timeout | No sync pattern received within 5 seconds |
-| Size invalid | Firmware size > available OTA partition |
-| CRC mismatch | Corrupted data during transmission |
-| Flash error | Hardware failure writing to flash |
+| Error Code | Cause | Recovery |
+|------------|-------|----------|
+| +OTAERR:1 | Sync header timeout or mismatch | Retry OTA command |
+| +OTAERR:2 | Version identical to running firmware | Use different firmware version |
+| +OTAERR:3 | UART communication failure | Check UART wiring and baud rate |
+| +OTAERR:4 | Flash write failed | Check flash health, reduce chunk size |
+| +OTAERR:5 | Firmware validation failed | Verify firmware binary integrity |
+| +OTAERR:8 | Buffer allocation or other error | Reduce chunk size, check free heap |
 
 ---
 
@@ -141,62 +168,71 @@ OK
 
 ## OTA Integration with ESP32-C5
 
-The OTA update process is managed by the ATHost component on the ESP32-C5:
+The OTA update process is managed by the h2_ota component on the ESP32-C5. See [OTA Firmware Updates](../../ota-firmware-updates.mdx) for complete documentation.
+
+### Overview
+
+The ESP32-C5 acts as an OTA proxy, downloading firmware from an HTTP server and forwarding it to the WROOM over UART in chunks:
 
 ```cpp
-bool ATHost_doOTA() {
-    // Send OTA update command
-    if (!ATHost_sendAT("AT+OTAUPDATE")) {
-        return false;
-    }
-    
-    // Wait for HOLD response
-    if (!ATHost_waitForResponse("HOLD", 5000)) {
-        return false;
-    }
-    
-    // Send sync pattern
-    uint8_t sync[] = {0xA5, 0xA5, 0xA5, 0xA5, 0xA5, 0xA5, 0xA5, 0xA5};
-    uart_write_bytes(UART_NUM_0, sync, sizeof(sync));
-    
-    // Send firmware size
-    uint32_t fw_size = get_firmware_size();
-    uart_write_bytes(UART_NUM_0, &fw_size, sizeof(fw_size));
-    
-    // Stream firmware data
-    stream_firmware_data();
-    
-    // Send CRC32
-    uint32_t crc = calculate_firmware_crc();
-    uart_write_bytes(UART_NUM_0, &crc, sizeof(crc));
-    
-    // Wait for completion
-    return ATHost_waitForResponse("OK", 30000);
+bool h2_ota_start(const String& url, const String& version) {
+    // Trigger OTA state machine
+    // Full implementation in components/athost/src/h2_ota.cpp
 }
 ```
 
 ### OTA Workflow
 
-1. **ESP32-C5**: Downloads firmware from HTTP/HTTPS
-2. **Preparation**: Validates firmware and calculates CRC
-3. **AT+OTAUPDATE**: Initiates update on ESP32-H2
-4. **Data Stream**: Binary transfer over UART at 5Mbps
-5. **Verification**: ESP32-H2 validates CRC and flashes firmware
-6. **Restart**: ESP32-H2 boots with new firmware
-7. **Validation**: ESP32-C5 verifies successful boot and communication
+1. **MQTT Trigger**: C5 receives `updateH2Firmware` command with URL and version
+2. **Fetch Metadata**: C5 downloads firmware info (length, chunks, chunk size, MD5)
+3. **AT+OTAUPDATE**: C5 sends command with negotiated chunk size
+4. **Sync Header**: C5 sends 6-byte sync: `{0xC0, 0xFF, 0xFE, 0xAA, 0x55, 0x90}`
+5. **Chunked Transfer**: C5 streams firmware chunks over UART at 921.6 kbaud
+6. **Validation**: WROOM validates first chunk header, sends `+OTAACK`
+7. **Completion**: After all chunks, WROOM validates and sends `+OTAOK`, then reboots
+8. **Verification**: C5 detects WROOM reboot via LightPipe heartbeat recovery
+
+### State Machine (C5 Side)
+
+```c
+typedef enum {
+    H2_OTA_IDLE,              // Not updating
+    H2_OTA_FETCH_INFO,        // Get firmware metadata from server
+    H2_OTA_SEND_OTA_CMD,      // Send AT+OTAUPDATE to WROOM
+    H2_OTA_DOWNLOAD_CHUNK,    // Download chunk from server
+    H2_OTA_TRANSMIT_CHUNK,    // Send chunk to WROOM via UART
+    H2_OTA_FINALIZE,          // Validate full MD5 and complete
+    H2_OTA_ERROR              // Error state
+} h2_ota_state_t;
+```
 
 ### Security Considerations
 
-- **Signed Firmware**: ESP32-H2 can verify cryptographic signatures
-- **Rollback**: Automatic rollback if new firmware fails to boot
-- **Checksums**: CRC32 prevents corrupted firmware installation
-- **Size Limits**: Prevents buffer overflow attacks
+- **Version Validation**: WROOM rejects firmware with same version as running or last-invalid
+- **SHA-256 Hash**: Logged from first chunk firmware header
+- **MD5 Verification**: C5 validates full firmware MD5 before declaring success
+- **Rollback**: Automatic rollback if new firmware fails to boot (ESP-IDF feature)
+- **Chunk Integrity**: Per-chunk MD5 validation optional via `Content-MD5` header
 
 ### Performance Characteristics
 
-- **Transfer Rate**: ~90 KB/s over 921.6kbaud UART
+- **Transfer Rate**: ~90 KB/s over 921.6 kbaud UART
 - **Typical Update**: ~2MB firmware takes ~22 seconds to transfer
-- **Total Time**: ~30 seconds including verification and restart
-- **Reliability**: >99.9% success rate with proper error handling
+- **Total Time**: ~30 seconds including download, verification, and restart
+- **Chunk Size**: 4-16 KB, dynamically calculated (10% of free heap)
+- **Retry Logic**: Up to 20 retries per chunk on HTTP/MD5 errors
+
+### Error Handling
+
+| Source | Error | Response |
+|--------|-------|----------|
+| WROOM | +OTAERR:1 | Sync header timeout - retry OTA command |
+| WROOM | +OTAERR:2 | Version conflict - use different version |
+| WROOM | +OTAERR:5 | Validation failed - check firmware integrity |
+| C5 | ACK timeout | First chunk not acknowledged within 5s |
+| C5 | MD5 mismatch | Full firmware MD5 doesn't match server |
+| C5 | HTTP error | Chunk download failed - retry logic active |
 
 This OTA system enables field updates of the ESP32 WROOM firmware without physical access, maintaining system reliability through comprehensive error checking and recovery mechanisms.
+
+**For complete OTA documentation, see:** [OTA Firmware Updates Guide](../../ota-firmware-updates.mdx)
