@@ -15,8 +15,8 @@ The Watts v3 system includes a W5500 SPI-based Ethernet controller providing wir
 | **Driver Implementation** | [esp32_w5500.cpp](src/Watts-ESP-IDF-C5/components/eth_w5500/src/esp32_w5500.cpp) | Full driver implementation |
 | **Network Switcher** | [net_switcher.h](src/Watts-ESP-IDF-C5/components/eth_w5500/include/net_switcher.h) | ETH/WiFi failover API |
 | **Switcher Implementation** | [net_switcher.cpp](src/Watts-ESP-IDF-C5/components/eth_w5500/src/net_switcher.cpp) | Failover implementation |
-| **WLED Integration** | [wled.h:34-35](src/Watts-ESP-IDF-C5/components/wled/wled.h#L34-L35) | W5500 includes |
-| **Power Board Reset** | [watts_power_board.cpp:353-384](src/Watts-ESP-IDF-C5/components/watts_power_board/watts_power_board.cpp#L353-L384) | Hardware reset via TCA9555 |
+| **WLED Integration** | [wled.h](src/Watts-ESP-IDF-C5/components/wled/wled.h) | W5500 includes |
+| **Power Board Reset** | [watts_power_board.cpp](src/Watts-ESP-IDF-C5/components/watts_power_board/watts_power_board.cpp) | `watts_power_reset_w5500()` function |
 
 ## Hardware Architecture
 
@@ -33,7 +33,7 @@ The W5500 connects to the ESP32-C5 via the SPI2 bus:
 | INT | -1 | Interrupt (polling mode) |
 | RST | - | Via TCA9555 P1.6 |
 
-**Source:** [wled.h:329-332](src/Watts-ESP-IDF-C5/components/wled/wled.h#L329-L332) - GPIO definitions
+**Source:** GPIO definitions in [wled.h](src/Watts-ESP-IDF-C5/components/wled/wled.h)
 
 ### Reset Control via Power Board
 
@@ -43,7 +43,7 @@ The W5500 reset line is controlled by the TCA9555 I/O expander on the power boar
 TCA9555 (0x21) Port 1, Bit 6 → W5500 RESET (active-low)
 ```
 
-**Source:** [watts_power_board.cpp:90](src/Watts-ESP-IDF-C5/components/watts_power_board/watts_power_board.cpp#L90)
+**Source:** `U2_P1_W5500_RST_BIT` in [watts_power_board.cpp](src/Watts-ESP-IDF-C5/components/watts_power_board/watts_power_board.cpp)
 
 ```cpp
 // Power board expander bit for W5500 reset
@@ -56,7 +56,7 @@ static constexpr uint8_t U2_P1_W5500_RST_BIT = (1 << 6);
 
 The main driver class provides full Ethernet stack integration:
 
-**Source:** [esp32_w5500.h:35-133](src/Watts-ESP-IDF-C5/components/eth_w5500/include/esp32_w5500.h#L35-L133)
+**Source:** `ESP32_W5500` class in [esp32_w5500.h](src/Watts-ESP-IDF-C5/components/eth_w5500/include/esp32_w5500.h)
 
 ```cpp
 class ESP32_W5500 {
@@ -95,7 +95,7 @@ extern ESP32_W5500 W5500ETH;  // Global instance
 
 WLED uses a macro to check any network connectivity:
 
-**Source:** [wled.h:1016-1018](src/Watts-ESP-IDF-C5/components/wled/wled.h#L1016-L1018)
+**Source:** `WLED_CONNECTED` macro in [wled.h](src/Watts-ESP-IDF-C5/components/wled/wled.h)
 
 ```cpp
 #define WLED_CONNECTED (WiFi.status() == WL_CONNECTED || \
@@ -107,7 +107,7 @@ WLED uses a macro to check any network connectivity:
 
 ### Basic Initialization
 
-**Source:** [esp32_w5500.cpp:297-497](src/Watts-ESP-IDF-C5/components/eth_w5500/src/esp32_w5500.cpp#L297-L497)
+**Source:** `begin()` function in [esp32_w5500.cpp](src/Watts-ESP-IDF-C5/components/eth_w5500/src/esp32_w5500.cpp)
 
 ```cpp
 #include "esp32_w5500.h"
@@ -160,7 +160,7 @@ The `begin()` method performs these steps:
 
 **Configuration Constants:**
 
-**Source:** [esp32_w5500.cpp:50-51](src/Watts-ESP-IDF-C5/components/eth_w5500/src/esp32_w5500.cpp#L50-L51)
+**Source:** Timeout constants in [esp32_w5500.cpp](src/Watts-ESP-IDF-C5/components/eth_w5500/src/esp32_w5500.cpp)
 
 ```cpp
 #define ETH_IP_TIMEOUT_MS           (3 * 60 * 1000)  // 3 minutes
@@ -171,7 +171,7 @@ The `begin()` method performs these steps:
 
 ### Ethernet Events
 
-**Source:** [esp32_w5500.cpp:98-149](src/Watts-ESP-IDF-C5/components/eth_w5500/src/esp32_w5500.cpp#L98-L149)
+**Source:** `eth_event_handler()` in [esp32_w5500.cpp](src/Watts-ESP-IDF-C5/components/eth_w5500/src/esp32_w5500.cpp)
 
 | Event | Action |
 |-------|--------|
@@ -202,7 +202,7 @@ case ETHERNET_EVENT_CONNECTED:
 
 ### IP Events
 
-**Source:** [esp32_w5500.cpp:153-187](src/Watts-ESP-IDF-C5/components/eth_w5500/src/esp32_w5500.cpp#L153-L187)
+**Source:** `got_ip_event_handler()` in [esp32_w5500.cpp](src/Watts-ESP-IDF-C5/components/eth_w5500/src/esp32_w5500.cpp)
 
 | Event | Action |
 |-------|--------|
@@ -232,7 +232,7 @@ The W5500 driver includes automatic recovery for DHCP failures. If link is up bu
 
 ### Recovery Detection
 
-**Source:** [esp32_w5500.cpp:1035-1056](src/Watts-ESP-IDF-C5/components/eth_w5500/src/esp32_w5500.cpp#L1035-L1056)
+**Source:** `checkRecoveryNeeded()` in [esp32_w5500.cpp](src/Watts-ESP-IDF-C5/components/eth_w5500/src/esp32_w5500.cpp)
 
 ```cpp
 bool ESP32_W5500::checkRecoveryNeeded(void)
@@ -261,7 +261,7 @@ bool ESP32_W5500::checkRecoveryNeeded(void)
 
 ### Recovery Sequence
 
-**Source:** [esp32_w5500.cpp:1058-1119](src/Watts-ESP-IDF-C5/components/eth_w5500/src/esp32_w5500.cpp#L1058-L1119)
+**Source:** `triggerRecovery()` in [esp32_w5500.cpp](src/Watts-ESP-IDF-C5/components/eth_w5500/src/esp32_w5500.cpp)
 
 The recovery sequence performs:
 
@@ -367,7 +367,7 @@ void NetSwitcher_on_wifi_got_ip(void);
 
 ### Switch to Ethernet
 
-**Source:** [net_switcher.cpp:256-291](src/Watts-ESP-IDF-C5/components/eth_w5500/src/net_switcher.cpp#L256-L291)
+**Source:** `NetSwitcher_switch_to_eth()` in [net_switcher.cpp](src/Watts-ESP-IDF-C5/components/eth_w5500/src/net_switcher.cpp)
 
 When switching to Ethernet:
 
@@ -416,7 +416,7 @@ void NetSwitcher_switch_to_eth(const char* hostname)
 
 ### Switch to WiFi
 
-**Source:** [net_switcher.cpp:293-335](src/Watts-ESP-IDF-C5/components/eth_w5500/src/net_switcher.cpp#L293-L335)
+**Source:** `NetSwitcher_switch_to_wifi()` in [net_switcher.cpp](src/Watts-ESP-IDF-C5/components/eth_w5500/src/net_switcher.cpp)
 
 When switching to WiFi (fallback):
 
@@ -430,7 +430,7 @@ When switching to WiFi (fallback):
 
 ### DNS Handling
 
-**Source:** [net_switcher.cpp:45-181](src/Watts-ESP-IDF-C5/components/eth_w5500/src/net_switcher.cpp#L45-L181)
+**Source:** DNS handling functions in [net_switcher.cpp](src/Watts-ESP-IDF-C5/components/eth_w5500/src/net_switcher.cpp)
 
 The NetSwitcher properly propagates DNS servers to lwIP:
 
@@ -462,7 +462,7 @@ if (!dns0_valid && !dns1_valid) {
 
 ### W5500 Reset Function
 
-**Source:** [watts_power_board.cpp:353-384](src/Watts-ESP-IDF-C5/components/watts_power_board/watts_power_board.cpp#L353-L384)
+**Source:** `watts_power_reset_w5500()` in [watts_power_board.cpp](src/Watts-ESP-IDF-C5/components/watts_power_board/watts_power_board.cpp)
 
 ```cpp
 bool watts_power_reset_w5500(void)
@@ -499,7 +499,7 @@ bool watts_power_reset_w5500(void)
 
 ### Expander Configuration
 
-**Source:** [watts_power_board.cpp:344-351](src/Watts-ESP-IDF-C5/components/watts_power_board/watts_power_board.cpp#L344-L351)
+**Source:** `setup_expander_gpio()` in [watts_power_board.cpp](src/Watts-ESP-IDF-C5/components/watts_power_board/watts_power_board.cpp)
 
 During power board initialization, the W5500 reset pin is configured:
 
@@ -579,7 +579,7 @@ void WLED::loop()
 
 ### Clock Speed
 
-**Source:** [esp32_w5500.cpp:369-372](src/Watts-ESP-IDF-C5/components/eth_w5500/src/esp32_w5500.cpp#L369-L372)
+**Source:** SPI clock validation in [esp32_w5500.cpp](src/Watts-ESP-IDF-C5/components/eth_w5500/src/esp32_w5500.cpp)
 
 The W5500 supports SPI clock speeds of 8-25 MHz:
 
@@ -594,7 +594,7 @@ if (SPICLOCK_MHZ < 8 || SPICLOCK_MHZ > 25) {
 
 The driver uses polling mode (INT=-1) rather than hardware interrupts:
 
-**Source:** [esp32_w5500.cpp:384-385](src/Watts-ESP-IDF-C5/components/eth_w5500/src/esp32_w5500.cpp#L384-L385)
+**Source:** W5500 config setup in [esp32_w5500.cpp](src/Watts-ESP-IDF-C5/components/eth_w5500/src/esp32_w5500.cpp)
 
 ```cpp
 eth_w5500_config_t w5500_cfg = ETH_W5500_DEFAULT_CONFIG(...);

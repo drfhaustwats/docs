@@ -185,7 +185,7 @@ The C5 uses its SPI pins for ParlIO communication to the WROOM:
 - **ParlIO CLK**: Uses `PINS.spi.sclk` (GPIO 23)
 - **ParlIO VALID**: Uses `PINS.spi.cs` (GPIO 28)
 
-These mappings are defined in [NeoEsp32ParlC5SharedManager.h:36-42](src/Watts-ESP-IDF-C5/components/NeoPixelBus/src/internal/methods/NeoEsp32ParlC5SharedManager.h#L36-L42)
+These mappings are defined in `C5_PARLIO_*` macros in [NeoEsp32ParlC5SharedManager.h](src/Watts-ESP-IDF-C5/components/NeoPixelBus/src/internal/methods/NeoEsp32ParlC5SharedManager.h)
 
 ### Signal Quality Requirements
 - **Rise/Fall Times**: < 5ns for 30 MHz operation
