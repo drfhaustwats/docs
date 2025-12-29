@@ -113,8 +113,8 @@ parlio_tx_gpio_config_t gpio_config = {
 **Clock Generation:**
 - **Source**: 80MHz APB clock (PLL-derived)
 - **Output**: 80MHz square wave with ~50% duty cycle
-- **Jitter**: <1ns RMS (crystal stability dependent)
-- **Edge Rate**: <5ns rise/fall time
+- **Jitter**: &lt;1ns RMS (crystal stability dependent)
+- **Edge Rate**: &lt;5ns rise/fall time
 
 **Data Timing:**
 - **Setup Time**: 6.25ns before clock rising edge
@@ -292,9 +292,9 @@ VALID (Frame)     →   CS (Active High)
 ```
 
 **Critical Timing Requirements:**
-- **Clock Skew**: <2ns between CLK and DATA signals
+- **Clock Skew**: &lt;2ns between CLK and DATA signals
 - **Setup/Hold**: Meet SPI slave timing specifications
-- **CS Assertion**: Must precede data by >50ns
+- **CS Assertion**: Must precede data by &gt;50ns
 
 ## Memory Architecture
 
@@ -347,16 +347,16 @@ Typical:     800 pixels/ch = 12812 bytes = 1.42ms
 **ESP32-C5 Load (60 FPS, 1000 pixels/channel):**
 - **WLED Effects**: 15-30% (effect dependent)
 - **Frame Creation**: 3% (memory copy + CRC)
-- **ParlIO Management**: <1% (DMA-based)
-- **AT Commands**: <1% (queued processing)
-- **NeoPixelBus**: <2% (library overhead)
+- **ParlIO Management**: &lt;1% (DMA-based)
+- **AT Commands**: &lt;1% (queued processing)
+- **NeoPixelBus**: &lt;2% (library overhead)
 - **Total**: 19-36% typical
 
 **ESP32 WROOM Load (60 FPS, 1000 pixels/channel):**
-- **SPI Reception**: <1% (DMA-based)
+- **SPI Reception**: &lt;1% (DMA-based)
 - **Frame Processing**: 5% (validation + splitting)
 - **NeoPixelBus**: 8% (library + RMT management)
-- **AT Processing**: <1% (simple commands)
+- **AT Processing**: &lt;1% (simple commands)
 - **BLE Stack**: 5-10% (connection dependent)
 - **Total**: 14-24% typical
 

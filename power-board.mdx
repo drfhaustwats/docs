@@ -400,6 +400,315 @@ if (watts_power_is_present() && g_probe.stm_ok) {
 }
 ```
 
+## STM32C0 On-Board Firmware
+
+The power board includes an STM32C011F6 microcontroller that serves as an intelligent supervisor for the A3942 motor driver and INA237 power monitors. The STM32 firmware operates in two distinct modes based on hardware configuration.
+
+### Operating Modes
+
+The STM32 reads configuration pins from the TCA9555 GPIO expander at boot to determine its operating mode:
+
+| Config Pin | Function | Values |
+|------------|----------|--------|
+| **P0.0** | Current Mode | 0 = 5A threshold, 1 = 8A threshold |
+| **P0.1** | Role | 0 = PERIPHERAL (I2C slave), 1 = STANDALONE (autonomous) |
+| **P0.2** | Keep-Alive Bypass | 0 = enabled, 1 = disabled (STANDALONE only) |
+
+**Configuration Examples:**
+```
+P0 = 0b00000000  →  5A mode, PERIPHERAL role, keep-alive always on
+P0 = 0b00000010  →  8A mode, PERIPHERAL role, keep-alive always on
+P0 = 0b00000001  →  5A mode, STANDALONE, keep-alive enabled
+P0 = 0b00000101  →  5A mode, STANDALONE, keep-alive bypassed
+```
+
+### PERIPHERAL Mode (ESP32-C5 Control)
+
+In PERIPHERAL mode, the STM32 acts as an I2C slave at address 0x50, responding to commands from the ESP32-C5. This is the standard configuration for the Watts v3 system.
+
+**Key Features:**
+- **I2C Command Interface**: 19 commands for output control, fault reading, and A3942 reset
+- **Keep-Alive Enforcement**: Always monitors WS2812 data activity (P0.2 ignored)
+- **Fault Caching**: Polls A3942 faults every 100ms for fast I2C reads
+- **Interrupt-Driven**: Minimal polling, instant command response
+
+**I2C Command Set:**
+
+| Command | Code | Description |
+|---------|------|-------------|
+| CMD_ENABLE_OUTPUTS | 0x01 | Enable ENABLE pin (active LOW) |
+| CMD_DISABLE_OUTPUTS | 0x02 | Disable ENABLE pin (active HIGH) |
+| CMD_RESET_A3942 | 0x03 | Clear A3942 faults via SPI |
+| CMD_READ_STATUS | 0x04 | Read system status byte |
+| CMD_READ_FAULT_CH1-4 | 0x05-0x08 | Read fault for channel 1-4 |
+| CMD_CLEAR_FAULT_FLAG | 0x09 | Clear fault flags |
+| CMD_ENABLE_CH1-4 | 0x11-0x14 | Enable individual channel |
+| CMD_DISABLE_CH1-4 | 0x21-0x24 | Disable individual channel |
+| CMD_ENABLE_ALL | 0x30 | Enable all channels |
+| CMD_DISABLE_ALL | 0x31 | Disable all channels |
+
+**Status Byte Bits:**
+
+| Bit | Mask | Description |
+|-----|------|-------------|
+| 0 | 0x01 | STATUS_OUTPUTS_ENABLED - ENABLE pin is HIGH |
+| 1 | 0x02 | STATUS_A3942_FAULT - A3942 has active faults |
+| 2 | 0x04 | STATUS_SPI_ERROR - SPI communication error |
+| 3 | 0x08 | STATUS_I2C_ERROR - I2C error occurred |
+| 4 | 0x10 | STATUS_OVERCURRENT - Overcurrent detected (any channel) |
+
+### STANDALONE Mode (Autonomous Operation)
+
+In STANDALONE mode, the STM32 operates independently without an external MCU. This mode is used for testing, development, or standalone LED control.
+
+**Key Features:**
+- **Autonomous Monitoring**: Polls INA237 current sensors every 50ms
+- **Automatic Overcurrent Recovery**: 10-attempt retry with 60-second intervals
+- **Configurable Keep-Alive**: Can be bypassed via P0.2 for always-on operation
+- **UART Logging**: Debug logs at 115200 baud on USART1
+
+**Autonomous Behavior:**
+- Reads current from all 4 channels every 1 second
+- Detects overcurrent via TCA9555 ALERT inputs (P1.0-P1.3)
+- Automatically attempts to clear faults using 3-step protocol
+- Logs status to UART: `STANDALONE | CH1:150mA CH2:0mA CH3:250mA[OC:3/10] CH4:0mA | KA:5234 ms | 0x11`
+
+### WS2812 Keep-Alive Detection
+
+Both modes monitor WS2812 data line activity to detect if the LED controller is running. If no activity is detected for 20 seconds, outputs are automatically disabled to prevent LED strips from staying powered with no control signal.
+
+**Implementation:**
+```c
+// Timer 14 configured for input capture on PA4 (WS2812 data line)
+htim14.Init.Prescaler = 47;         // 48MHz / 48 = 1MHz timer clock
+htim14.Init.Period = 65535;
+sConfigIC.ICPolarity = TIM_INPUTCHANNELPOLARITY_BOTHEDGE;
+
+// Interrupt fires on every WS2812 bit transition
+void HAL_TIM_IC_CaptureCallback(TIM_HandleTypeDef *htim) {
+    if (htim->Instance == TIM14) {
+        last_keepalive = HAL_GetTick();  // Reset timeout
+    }
+}
+```
+
+**Keep-Alive Timeout:**
+- **PERIPHERAL Mode**: Always enabled (20-second timeout)
+- **STANDALONE Mode**: Enabled by default, can be bypassed via P0.2
+
+**Timeout Behavior:**
+```
+Keepalive Elapsed        Action
+─────────────────────────────────
+< 20 seconds            Outputs enabled
+> 20 seconds            ENABLE pin LOW (outputs disabled)
+WS2812 activity         Counter resets, outputs re-enabled
+```
+
+### A3942 Motor Driver Control
+
+The STM32 interfaces with the A3942 4-channel motor driver via SPI to read faults and control channels.
+
+**SPI Configuration:**
+- **Mode**: SPI1 master, CPOL=0, CPHA=0 (Mode 0)
+- **Speed**: 6 MHz (48MHz / 8)
+- **Pins**: PA6 (MISO), PA7 (CSZ), PA1 (SCK), PA2 (MOSI)
+- **Control Pins**: PA3 (RESETZ active-LOW), PA5 (ENABLE active-HIGH)
+
+**SPI Protocol:**
+```c
+// Read fault byte (D5=0 to read without modification)
+uint8_t fault_byte = A3942_SPI_Transfer(0x00);
+uint8_t channel = (fault_byte >> 6) & 0x03;    // D7:D6 = channel address
+uint8_t faults = fault_byte & 0x1F;            // D4:D0 = fault bits
+
+// Write to channel (D5=1 to enable write)
+uint8_t cmd = (channel << 6) | 0x20 | control_bits;
+A3942_SPI_Transfer(cmd);
+```
+
+**Control Bits (D4:D0):**
+- **D4**: Reserved (always 0)
+- **D3**: CLEAR - Pulse HIGH to clear faults
+- **D2**: Reserved (always 0)
+- **D1**: Reserved (always 0)
+- **D0**: Reserved (always 0)
+
+**A3942 Fault Bits (read from fault byte D4:D0):**
+- **D4**: CP_UVLO - Charge pump undervoltage lockout
+- **D3**: TWARN - Overtemperature warning
+- **D2**: OL - Open load (no LED strip connected)
+- **D1**: STB - Short to battery (output shorted to V+)
+- **D0**: STG - Short to ground (output shorted to GND)
+
+### Preflight Load Detection
+
+At boot, the STM32 performs a "preflight check" to detect which channels have LED strips connected. This prevents attempting overcurrent recovery on channels with no load.
+
+**Preflight Algorithm:**
+1. **Configure INA237**: Set ALATCH=1, APOL=1 (active-high ALERT)
+2. **Wait for Faults**: With outputs OFF, channels with loads trigger OL (open load) fault
+3. **Read A3942 Faults**: Snapshot fault state for all 4 channels
+4. **Detect Loads**: Channels *without* OL fault have LED strips connected
+5. **Switch to Normal**: Reconfigure INA237 with APOL=0 (active-low for overcurrent)
+
+**Example Preflight Log:**
+```
+Preflight fault check:
+  CH1: 0x00 [OK] -> Load
+  CH2: 0x04 [OL]
+  CH3: 0x00 [OK] -> Load
+  CH4: 0x04 [OL]
+
+channels_with_load = 0b0101  (CH1 and CH3 have loads)
+```
+
+### Overcurrent Recovery (STANDALONE Mode Only)
+
+In STANDALONE mode, the STM32 automatically attempts to recover from overcurrent faults using a sophisticated 3-step protocol with verification polling.
+
+**Recovery Parameters:**
+```c
+#define OC_RETRY_INTERVAL_MS    60000   // Retry every 1 minute
+#define OC_MAX_ATTEMPTS         10      // Give up after 10 attempts
+#define OC_VERIFY_DURATION_MS   500     // Poll ALERT for 500ms after clear
+#define OC_VERIFY_INTERVAL_MS   50      // Poll every 50ms during verify
+#define OC_VERIFY_THRESHOLD_PCT 80      // Require 80% of polls OK
+```
+
+**3-Step Recovery Protocol:**
+```c
+// STEP 1: Clear INA237 software latch
+uint16_t diag = INA237_Read(addr, 0x0B);  // Read DIAG_ALERT register
+// Reading DIAG_ALERT clears the INA237 internal latch
+
+// STEP 2: Clear A3942 hardware fault
+A3942_WriteInput(ch, 0x08);  // D3=1 (CLEAR bit)
+HAL_Delay(10);
+
+// STEP 3: Verify clear with polling
+for (500ms) {
+    HAL_Delay(50ms);
+    uint8_t p1_state = TCA9555_Read8(TCA_INPUT_P1);
+    bool alert_high = (p1_state & (1 << ch)) != 0;
+
+    if (alert_high) polls_ok++;
+    else {
+        // ALERT re-asserted - fault still present
+        clear_failed = true;
+        break;
+    }
+}
+
+// Require 80% of polls OK (8 out of 10 polls)
+if (polls_ok >= 8) {
+    // Success - reset attempt counter
+    oc_attempt_count[ch] = 0;
+} else {
+    // Failed - will retry in 60 seconds
+}
+```
+
+**Recovery State Machine:**
+```
+OC Detected → Attempt 1 (immediate)
+                ↓ (failed)
+              Attempt 2 (after 60s)
+                ↓ (failed)
+              Attempt 3 (after 60s)
+                ...
+              Attempt 10 (after 60s)
+                ↓ (failed)
+              Give Up (channel disabled permanently)
+```
+
+### INA237 Overcurrent Configuration
+
+The STM32 configures all 4 INA237 power monitors with overcurrent thresholds based on the current mode setting.
+
+**Configuration:**
+```c
+// Overcurrent threshold based on P0.0 (current mode)
+uint16_t oc_threshold = (current_mode == MODE_8A) ? 16000 : 10000;
+
+// ADC config: Current + Voltage, CT=280µs, AVG=4
+uint16_t adc_config = 0xB6C1;
+
+for (uint8_t i = 0; i < 4; i++) {
+    // Reset INA237
+    INA237_Write(INA237_ADDRS[i], 0x00, 0x8000);
+
+    // Calibration for 10mΩ shunt, 305µA/LSB
+    INA237_Write(INA237_ADDRS[i], 0x02, 2500);
+
+    // ADC Configuration
+    INA237_Write(INA237_ADDRS[i], 0x01, adc_config);
+
+    // Overcurrent threshold (SOVL register)
+    INA237_Write(INA237_ADDRS[i], 0x0C, oc_threshold);
+
+    // Alert config: ALATCH=1 (latched), APOL=0 (active-low for OC)
+    INA237_Write(INA237_ADDRS[i], 0x0B, 0x8000);
+}
+```
+
+**Threshold Calculation:**
+```
+5A Mode: oc_threshold = 10000 (raw INA237 units)
+8A Mode: oc_threshold = 16000 (raw INA237 units)
+
+Current scaling: 305µA/LSB (from calibration)
+5A threshold: 10000 × 0.305mA = 3050mA = 3.05A
+8A threshold: 16000 × 0.305mA = 4880mA = 4.88A
+```
+
+### Hardware Connections
+
+**STM32C011F6 Pinout:**
+
+| Pin | Function | Connection |
+|-----|----------|------------|
+| PA1 | SPI1_SCK | A3942 SPI clock |
+| PA2 | SPI1_MOSI | A3942 SPI data out |
+| PA3 | GPIO Output | A3942 RESETZ (active-LOW) |
+| PA4 | TIM14_CH1 | WS2812 data line (input capture) |
+| PA5 | GPIO Output | A3942 ENABLE (active-HIGH) |
+| PA6 | SPI1_MISO | A3942 SPI data in |
+| PA7 | GPIO Output | A3942 CSZ (chip select, active-LOW) |
+| PA9 | USART1_TX | Debug UART output (115200 baud) |
+| PA10 | USART1_RX | Debug UART input |
+| PA11 | I2C1_SDA | Power board I2C bus |
+| PA12 | I2C1_SCL | Power board I2C bus |
+
+**I2C Slave Address:**
+```c
+hi2c1.Init.OwnAddress1 = 160;  // 0x50 << 1 (7-bit address 0x50)
+```
+
+### Firmware Source Code
+
+The STM32C0 firmware source is located in [src/power super/](src/power%20super/Core/Src/main.c) and includes:
+
+**Key Files:**
+- [main.c](src/power%20super/Core/Src/main.c) - Main firmware (1270 lines)
+- [main.h](src/power%20super/Core/Inc/main.h) - GPIO pin definitions
+- [stm32c0xx_it.c](src/power%20super/Core/Src/stm32c0xx_it.c) - Interrupt handlers
+
+**Build Configuration:**
+- **MCU**: STM32C011F6U6
+- **Clock**: 48MHz HSI (internal oscillator)
+- **Flash**: 32KB
+- **RAM**: 6KB
+- **Toolchain**: STM32CubeIDE with GCC ARM
+
+**Logging Control:**
+```c
+// Set to 0 to disable all UART logging (saves flash/RAM)
+#define LOGGING_ENABLED  1
+```
+
+When `LOGGING_ENABLED = 0`, the `LOG()` macro compiles to no-op, eliminating all logging code from the binary for production builds.
+
 ## W5500 Ethernet Integration
 
 The power board controls the W5500 ethernet controller's reset line via the TCA9555 I/O expander.
