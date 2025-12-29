@@ -425,6 +425,279 @@ if (forceResetCount >= 3) {
 }
 ```
 
+## LightPipe State Management
+
+The ESP32-C5 includes a comprehensive state management system for monitoring the health and initialization status of the ESP32 WROOM ("LightPipe") connection. This ensures reliable LED output and automatic recovery from failures.
+
+### LightPipeStateManager Class
+
+The `LightPipeStateManager` is a singleton class that tracks the WROOM's operational state through heartbeat monitoring:
+
+```cpp
+// File: components/wled/lightpipe_state.h
+
+class LightPipeStateManager {
+public:
+    static LightPipeStateManager& getInstance();
+
+    // State management
+    void onHeartbeatReceived(bool lightpipe_initialized);
+    bool checkLightPipeStatus();
+    bool needsReinit() const;
+    void markLightPipeInitialized();
+
+    // OTA handling
+    void enterOTAMode();
+    void exitOTAMode();
+    bool isInOTA() const;
+
+    // Status queries
+    bool isAlive() const;
+    bool isInitialized() const;
+    const char* getStateString() const;
+
+private:
+    static constexpr uint32_t HEARTBEAT_TIMEOUT = 15000;  // 15 seconds
+    static constexpr uint8_t MAX_MISSED = 3;              // 3 missed = dead
+
+    uint32_t _startupTime;
+    uint32_t _lastHeartbeat;
+    bool _lightPipeAlive;
+    bool _lightPipeInitialized;
+    bool _needsReinit;
+    uint8_t _missedHeartbeats;
+    bool _inOTA;
+    uint32_t _otaStartTime;
+    bool _waitingForReboot;
+    uint32_t _rebootWaitStart;
+};
+```
+
+### Heartbeat Protocol
+
+The WROOM sends periodic heartbeat messages to the C5 every **10 seconds**:
+
+**Heartbeat Format**: `+H2_ALIVE:<state>`
+- `+H2_ALIVE:0` - WROOM is alive but **not initialized** (no LED configuration loaded)
+- `+H2_ALIVE:1` - WROOM is alive and **fully initialized** (ready for LED data)
+
+**Monitoring Logic**:
+```cpp
+// File: components/wled/lightpipe_state.h (lines 31-58)
+
+void onHeartbeatReceived(bool lightpipe_initialized) {
+    if (_inOTA) return;  // Ignore heartbeats during OTA
+
+    _lastHeartbeat = millis();
+
+    // Detect recovery from reboot
+    if (_waitingForReboot) {
+        ESP_LOGI("LIGHTPIPE", "LightPipe back online after reboot (boot time: %lums)",
+                 millis() - _rebootWaitStart);
+        _waitingForReboot = false;
+    }
+
+    // Detect recovery from dead state
+    if (!_lightPipeAlive) {
+        ESP_LOGI("LIGHTPIPE", "LightPipe recovered (init_state=%d)", lightpipe_initialized);
+    }
+
+    _lightPipeAlive = true;
+    _missedHeartbeats = 0;
+
+    // Track initialization state changes
+    bool wasInitialized = _lightPipeInitialized;
+    _lightPipeInitialized = lightpipe_initialized;
+
+    if (!lightpipe_initialized && wasInitialized) {
+        ESP_LOGW("LIGHTPIPE", "LightPipe lost initialization (reboot detected)");
+        _needsReinit = true;
+    } else if (!lightpipe_initialized) {
+        _needsReinit = true;
+    }
+}
+```
+
+### State Machine
+
+The state manager implements five distinct states:
+
+| State | Description | Conditions |
+|-------|-------------|------------|
+| `OTA_IN_PROGRESS` | WROOM firmware update in progress | `_inOTA == true` |
+| `WAITING_REBOOT` | Waiting for WROOM to reboot after OTA | `_waitingForReboot == true` |
+| `DEAD` | No heartbeat received within timeout | `!_lightPipeAlive` |
+| `ALIVE_UNINIT` | Heartbeats received but not initialized | `_lightPipeAlive && !_lightPipeInitialized` |
+| `ALIVE_READY` | Fully operational and ready for LED data | `_lightPipeAlive && _lightPipeInitialized` |
+
+**State Query**:
+```cpp
+const char* getStateString() const {
+    if (_inOTA) return "OTA_IN_PROGRESS";
+    if (_waitingForReboot) return "WAITING_REBOOT";
+    if (!_lightPipeAlive) return "DEAD";
+    if (!_lightPipeInitialized) return "ALIVE_UNINIT";
+    return "ALIVE_READY";
+}
+```
+
+### Timeout Detection
+
+The system continuously monitors heartbeat timing and declares the WROOM dead after **45 seconds** of silence:
+
+```cpp
+// File: components/wled/lightpipe_state.h (lines 66-115)
+
+bool checkLightPipeStatus() {
+    // During OTA: 5-minute timeout
+    if (_inOTA) {
+        if (millis() - _otaStartTime > 300000) {
+            ESP_LOGE("LIGHTPIPE", "OTA timeout - forcing exit");
+            _inOTA = false;
+            _lightPipeAlive = false;
+            _needsReinit = true;
+        }
+        return true;
+    }
+
+    // Waiting for reboot: 30-second timeout
+    if (_waitingForReboot) {
+        if (millis() - _rebootWaitStart > 30000) {
+            ESP_LOGE("LIGHTPIPE", "LightPipe didn't come back after reboot");
+            _waitingForReboot = false;
+            _lightPipeAlive = false;
+            _needsReinit = true;
+            return false;
+        }
+        return true;
+    }
+
+    // Initial startup: 15-second grace period
+    if (_lastHeartbeat == 0) {
+        if (millis() - _startupTime > HEARTBEAT_TIMEOUT) {
+            ESP_LOGE("LIGHTPIPE", "No initial heartbeat received");
+            _needsReinit = true;
+            _startupTime = millis();  // Reset for retry
+            return false;
+        }
+        return true;
+    }
+
+    // Normal operation: 45-second timeout (3 x 15s)
+    uint32_t elapsed = millis() - _lastHeartbeat;
+    if (elapsed > HEARTBEAT_TIMEOUT) {
+        _missedHeartbeats++;
+        if (_missedHeartbeats >= MAX_MISSED) {
+            if (_lightPipeAlive) {
+                ESP_LOGE("LIGHTPIPE", "LightPipe heartbeat lost!");
+                _lightPipeAlive = false;
+                _lightPipeInitialized = false;
+                _needsReinit = true;
+            }
+            return false;
+        }
+    }
+    return true;
+}
+```
+
+**Timeout Thresholds**:
+- **Heartbeat interval**: 10 seconds (WROOM transmission rate)
+- **Timeout per heartbeat**: 15 seconds (10s + 5s grace period)
+- **Max missed heartbeats**: 3 consecutive misses
+- **Total timeout**: 45 seconds before declaring WROOM dead
+- **OTA timeout**: 5 minutes for firmware updates
+- **Reboot timeout**: 30 seconds after OTA completion
+
+### OTA Mode Handling
+
+During over-the-air firmware updates, the state manager enters a special mode:
+
+```cpp
+// Enter OTA mode (suspend monitoring)
+void enterOTAMode() {
+    _inOTA = true;
+    _otaStartTime = millis();
+    ESP_LOGW("LIGHTPIPE", "Entering OTA mode - suspending heartbeat monitoring");
+}
+
+// Exit OTA mode (wait for reboot)
+void exitOTAMode() {
+    _inOTA = false;
+    _lastHeartbeat = 0;
+    _lightPipeAlive = false;
+    _lightPipeInitialized = false;
+    _waitingForReboot = true;
+    _rebootWaitStart = millis();
+    ESP_LOGI("LIGHTPIPE", "OTA complete - waiting for LightPipe reboot");
+}
+```
+
+**OTA Sequence**:
+1. C5 calls `enterOTAMode()` before starting firmware transfer
+2. Heartbeat monitoring is suspended (WROOM won't send heartbeats during flash)
+3. OTA data is transmitted to WROOM
+4. C5 calls `exitOTAMode()` when transfer completes
+5. System enters `WAITING_REBOOT` state with 30-second timeout
+6. When first heartbeat arrives, WROOM is considered back online
+
+### Integration with Shared Manager
+
+The shared manager uses the state manager to determine when to reinitialize the WROOM:
+
+```cpp
+// Check if reinitialization is needed
+if (lightPipe.needsReinit()) {
+    ESP_LOGW(TAG, "Reinitializing LightPipe (state=%s)", lightPipe.getStateString());
+
+    // Send AT+LED_PREP command to reconfigure
+    snprintf(cmd, sizeof(cmd), "AT+LED_PREP=%u,%u,%u,%u,%u,%u,%u,%u",
+             px[0], px[1], px[2], px[3], fmt[0], fmt[1], fmt[2], fmt[3]);
+    _sendATCommand(cmd);
+
+    // Mark as initialized
+    lightPipe.markLightPipeInitialized();
+    lightPipe.clearReinitFlag();
+}
+```
+
+**Reinitialization Triggers**:
+- WROOM sends `+H2_ALIVE:0` (not initialized)
+- Heartbeat timeout expires (WROOM presumed rebooted)
+- OTA mode completes (new firmware loaded)
+- Initialization state lost unexpectedly
+
+### Usage Example
+
+```cpp
+// Global instance (singleton pattern)
+#define lightPipe LightPipeStateManager::getInstance()
+
+// In AT response handler for +H2_ALIVE
+void onH2Alive(bool initialized) {
+    lightPipe.onHeartbeatReceived(initialized);
+}
+
+// In main loop
+void loop() {
+    // Check status
+    lightPipe.checkLightPipeStatus();
+
+    // Handle reinitialization
+    if (lightPipe.needsReinit() && lightPipe.isAlive()) {
+        // Send AT+LED_PREP to reconfigure
+        sendLedPrepCommand();
+        lightPipe.markLightPipeInitialized();
+        lightPipe.clearReinitFlag();
+    }
+
+    // Only send frames when ready
+    if (lightPipe.isAlive() && lightPipe.isInitialized()) {
+        sendLedFrame();
+    }
+}
+```
+
 ## Hardware Configuration
 
 ### ParlIO Interface
@@ -774,3 +1047,14 @@ vTaskGetInfo(NULL, &taskInfo, pdTRUE, eInvalid);
 ```
 
 This implementation provides a robust, high-performance LED control system that leverages the ESP32-C5's processing power for WLED effects while utilizing the ESP32 WROOM's RMT peripherals for precise LED timing.
+
+## See Also
+
+- **[ESP32 WROOM Implementation Guide](esp32-wroom-implementation.mdx)** - Complete documentation of the WROOM secondary controller, including:
+  - [Heartbeat System](esp32-wroom-implementation.mdx#heartbeat-system) - How the WROOM sends `+H2_ALIVE` heartbeats to the C5
+  - [SPI LED Controller](esp32-wroom-implementation.mdx#spi-led-controller) - Frame reception and NeoPixelBus RMT output implementation
+  - [AT Command Protocol](esp32-wroom-implementation.mdx#at-firmware-architecture) - Full AT command framework including `AT+LED_PREP`
+
+- **[AT Protocol Documentation](at-protocol.mdx)** - Complete AT command reference and protocol specification
+
+- **[Frame Data Protocol](frame-data-protocol.mdx)** - Deep dive into the binary frame format and CRC validation
