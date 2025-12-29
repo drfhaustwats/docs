@@ -204,12 +204,12 @@ The Watts Power Board is an I2C-based power monitoring and management system tha
 
 | Device | I2C Address | Function | Channels |
 |--------|-------------|----------|----------|
-| **TCA9555 I/O Expander** | 0x21 | Power board GPIO control, W5500 reset | - |
+| **Main Board Expander** | 0x20 | Overcurrent interrupt aggregation (POWER_INT on P1.7) | - |
+| **Power Board Expander** | 0x21 | Power board GPIO, W5500 reset, ALERT pin monitoring (P1.0-P1.3) | - |
 | **INA237 Power Monitor 1** | 0x40 | Current/voltage/power/temp sensing | Channel 0 |
 | **INA237 Power Monitor 2** | 0x44 | Current/voltage/power/temp sensing | Channel 1 |
 | **INA237 Power Monitor 3** | 0x48 | Current/voltage/power/temp sensing | Channel 2 |
 | **INA237 Power Monitor 4** | 0x4C | Current/voltage/power/temp sensing | Channel 3 |
-| **Main Board Expander** | 0x20 | System GPIO (reserved) | - |
 | **STM32 Slave** | 0x50 | A3942 motor driver control (optional) | 4 channels |
 
 **Connection to ESP32-C5:**
@@ -273,11 +273,22 @@ STM32 programming interface:
 - **Temperature**: On-die sensor, 1°C resolution
 - **Overcurrent Detection**: Hardware ALERT pin with configurable threshold
 
-#### TCA9555 I/O Expander
-- **GPIO Pins**: 16 programmable I/O
+#### TCA9555 I/O Expanders (2×)
+
+**Main Board Expander (0x20):**
+- **Port 1, Bit 7 (P1.7)**: POWER_INT input (active low)
+  - Aggregates overcurrent alerts from power board
+  - Polled by C5 every 50ms for interrupt detection
+  - When low, triggers read of power board expander
+
+**Power Board Expander (0x21):**
+- **Port 1, Bits 0-3 (P1.0-P1.3)**: INA237 ALERT inputs (active low)
+  - P1.0: Channel 0 overcurrent alert
+  - P1.1: Channel 1 overcurrent alert
+  - P1.2: Channel 2 overcurrent alert
+  - P1.3: Channel 3 overcurrent alert
 - **W5500 Reset Control**: Dedicated GPIO for ethernet controller reset
-- **ALERT Monitoring**: Reads overcurrent ALERT signals from INA237 monitors
-- **Configuration**: Input/output direction per pin, polarity inversion
+- **Configuration Switches**: 3 DIP switches on Port 0 (P0.0-P0.2)
 
 #### STM32 Slave (Optional)
 - **A3942 Control**: 4-channel H-bridge motor driver control for LED outputs
@@ -301,12 +312,26 @@ STM32 programming interface:
 
 ### Automatic Overcurrent Protection
 
-The power board implements intelligent overcurrent detection and automatic clearing:
+The power board implements intelligent overcurrent detection and automatic clearing through a dual-expander architecture:
 
-**Detection:**
-- INA237 ALERT pin monitoring every 50ms
-- Hardware threshold configured at initialization
-- Latched overcurrent mask (bit 0-3 for channels 0-3)
+**Hardware Detection Path:**
+```
+INA237 Sensors (4×)
+  ↓ ALERT pins (active low)
+Power Board Expander (0x21)
+  - Port 1, bits 0-3 read ALERT status
+  ↓ POWER_INT output (active low)
+Main Board Expander (0x20)
+  - Port 1, bit 7 monitors POWER_INT
+  ↓ I2C polling (50ms)
+ESP32-C5 Firmware
+```
+
+**Software Detection Flow:**
+1. **Poll Main Expander**: Read P1.7 to check POWER_INT status
+2. **If POWER_INT Active**: Read Power Board Expander P1.0-P1.3
+3. **Update OC Mask**: Set bits for any channels with active ALERT
+4. **Snapshot Update**: Thread-safe update of overcurrent mask
 
 **Clearing Sequence:**
 1. Wait 5 seconds (configurable) after detection
