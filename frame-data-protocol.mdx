@@ -1,11 +1,11 @@
 ---
 title: "Frame Data Protocol"
-description: "Deep dive into the 80MHz ParlIO→SPI frame protocol, data formats, and peripheral configurations"
+description: "Deep dive into the 80MHz ParlIO→SPI frame protocol, 4-channel data formats, and NeoPixelBus LED control"
 ---
 
 # Frame Data Protocol
 
-The Frame Data Protocol is the high-speed communication backbone of the Watts v3 dual-MCU system, enabling synchronized LED control across ESP32-C5 and ESP32-H2 processors. This protocol achieves sub-millisecond coordination while maintaining data integrity through CRC validation.
+The Frame Data Protocol is the high-speed communication backbone of the Watts v3 dual-MCU system, enabling synchronized LED control across ESP32-C5 and ESP32 WROOM processors. This protocol achieves sub-millisecond coordination of all 4 LED channels while maintaining data integrity through CRC validation.
 
 ## Protocol Overview
 
@@ -13,29 +13,38 @@ The frame protocol operates in three distinct phases:
 
 ```
 Phase 1: Preparation    Phase 2: Data Transfer    Phase 3: Acknowledgment
-ESP32-C5 → ESP32-H2     ESP32-C5 → ESP32-H2       ESP32-H2 → ESP32-C5
+ESP32-C5 → WROOM        ESP32-C5 → WROOM          WROOM → ESP32-C5
   AT+LED_PREP            80MHz ParlIO Stream         +LED_DONE URC
-  (UART 5Mbps)           (Channels 2-3 data)        (Status report)
-     ~1ms                     ~100µs                    ~10µs
+  (UART 921.6kbaud)      (All 4 channels data)      (Status report)
+     ~1ms                     ~800µs                    ~10µs
 ```
+
+**Channel Distribution:**
+- **All 4 Channels (0-3)**: Transmitted to WROOM via ParlIO for RMT output
+- **WLED Rendering**: C5 renders full 4-channel frame in WLED effects engine
+- **NeoPixelBus**: Both C5 and WROOM use NeoPixelBus library for RMT-based LED control
 
 ## Frame Structure
 
-### Frame Header (8 bytes)
+### Frame Header (12 bytes)
 
 ```cpp
 typedef struct __attribute__((packed)) {
     uint16_t magic;        // 0x4C45 ("LE" - Little Endian marker)
+    uint16_t ch0_pixels;   // Channel 0 pixel count (0-1000)
+    uint16_t ch1_pixels;   // Channel 1 pixel count (0-1000)
     uint16_t ch2_pixels;   // Channel 2 pixel count (0-1000)
-    uint16_t ch3_pixels;   // Channel 3 pixel count (0-1000)  
+    uint16_t ch3_pixels;   // Channel 3 pixel count (0-1000)
     uint16_t crc16;        // CRC16-CCITT of payload data
 } led_frame_header_t;
+
+static_assert(sizeof(led_frame_header_t) == 12, "header must be 12 bytes");
 ```
 
 **Header Field Details:**
 - **Magic Number**: `0x4C45` provides frame synchronization and endianness validation
-- **Pixel Counts**: 16-bit values allow up to 1000 pixels per channel
-- **CRC16**: CCITT-FALSE polynomial (`0x1021`) with `0xFFFF` initialization
+- **Pixel Counts**: 16-bit values for all 4 channels (0-1000 pixels each)
+- **CRC16**: CCITT-FALSE polynomial (`0x1021`) with `0xFFFF` initialization over payload only
 
 ### Frame Layout
 
@@ -43,13 +52,17 @@ typedef struct __attribute__((packed)) {
 Byte Position    Content                    Size
 ─────────────────────────────────────────────────
 0-1             Magic (0x4C45)             2 bytes
-2-3             Channel 2 pixel count      2 bytes  
-4-5             Channel 3 pixel count      2 bytes
-6-7             CRC16 checksum             2 bytes
-8-X             Channel 2 pixel data       ch2_pixels × 4
-X+1-Y           Channel 3 pixel data       ch3_pixels × 4
+2-3             Channel 0 pixel count      2 bytes
+4-5             Channel 1 pixel count      2 bytes
+6-7             Channel 2 pixel count      2 bytes
+8-9             Channel 3 pixel count      2 bytes
+10-11           CRC16 checksum             2 bytes
+12-X            Channel 0 pixel data       ch0_pixels × 4
+X+1-Y           Channel 1 pixel data       ch1_pixels × 4
+Y+1-Z           Channel 2 pixel data       ch2_pixels × 4
+Z+1-W           Channel 3 pixel data       ch3_pixels × 4
 
-Maximum frame size: 8 + (1000 × 4) + (1000 × 4) = 8,008 bytes
+Maximum frame size: 12 + (1000 × 4 × 4) = 16,012 bytes
 ```
 
 ### Pixel Data Format
@@ -59,13 +72,13 @@ Each pixel uses 4 bytes in GRBW order (compatible with WS2812/SK6812):
 ```cpp
 struct pixel_data {
     uint8_t green;      // Green component (0-255)
-    uint8_t red;        // Red component (0-255)  
+    uint8_t red;        // Red component (0-255)
     uint8_t blue;       // Blue component (0-255)
     uint8_t white;      // White component (0-255, unused for WS2812)
 };
 ```
 
-This format matches the native WS2812 bit order, eliminating the need for color reordering during RMT transmission.
+This format matches the native WS2812 bit order, eliminating the need for color reordering during NeoPixelBus RMT transmission.
 
 ## 80MHz ParlIO → SPI Data Transfer
 
@@ -82,14 +95,14 @@ parlio_tx_unit_config_t config = {
     .data_width = 1,                         // 1-bit serial transmission
     .idle_value = 0,                         // Idle low
     .trans_queue_depth = 4,                  // 4 pending transactions
-    .max_transfer_size = 8008                // Maximum frame size
+    .max_transfer_size = 16012               // Maximum frame size (4 channels)
 };
 ```
 
 **GPIO Assignments:**
 ```cpp
 parlio_tx_gpio_config_t gpio_config = {
-    .clk_out_pin = GPIO_NUM_10,    // 80MHz clock to ESP32-H2
+    .clk_out_pin = GPIO_NUM_10,    // 80MHz clock to ESP32 WROOM
     .valid_pin = GPIO_NUM_25,      // Frame valid signal (active high)
     .data_pins = {GPIO_NUM_26}     // Serial data (WLED 3rd LED output)
 };
@@ -100,24 +113,24 @@ parlio_tx_gpio_config_t gpio_config = {
 **Clock Generation:**
 - **Source**: 80MHz APB clock (PLL-derived)
 - **Output**: 80MHz square wave with ~50% duty cycle
-- **Jitter**: &lt;1ns RMS (crystal stability dependent)
-- **Edge Rate**: &lt;5ns rise/fall time
+- **Jitter**: <1ns RMS (crystal stability dependent)
+- **Edge Rate**: <5ns rise/fall time
 
 **Data Timing:**
 - **Setup Time**: 6.25ns before clock rising edge
-- **Hold Time**: 6.25ns after clock rising edge  
+- **Hold Time**: 6.25ns after clock rising edge
 - **Valid Signal**: Asserted during entire frame transmission
 - **Idle Behavior**: Clock continues, data held low
 
-### SPI Slave Configuration (ESP32-H2)
+### SPI Slave Configuration (ESP32 WROOM)
 
-The ESP32-H2 receives the ParlIO stream via SPI slave interface:
+The ESP32 WROOM receives the ParlIO stream via SPI slave interface:
 
 ```cpp
 spi_bus_config_t buscfg = {
     .mosi_io_num = GPIO_NUM_11,          // Data from C5 GPIO 26
     .sclk_io_num = GPIO_NUM_10,          // Clock from C5 GPIO 10
-    .max_transfer_sz = 8008,             // Maximum frame size
+    .max_transfer_sz = 16012,            // Maximum frame size (4 channels)
     .flags = SPICOMMON_BUSFLAG_MASTER |
              SPICOMMON_BUSFLAG_SLAVE     // Dual-mode capability
 };
@@ -131,7 +144,7 @@ spi_slave_interface_config_t slvcfg = {
 ```
 
 **SPI Reception Strategy:**
-- **Pre-allocated Buffers**: 8 × 8KB DMA-capable buffers
+- **Pre-allocated Buffers**: 8 × 16KB DMA-capable buffers
 - **Circular Queuing**: Automatic re-queuing after processing
 - **Zero-Copy Operation**: Direct DMA to processing buffers
 - **Interrupt-Driven**: Minimal CPU overhead during reception
@@ -150,8 +163,7 @@ static const uint16_t crc16_table[256] = {
     // ... remaining 240 entries
 };
 
-static uint16_t crc16_ccitt_lut(const uint8_t *data, size_t len) {
-    uint16_t crc = 0xFFFF;              // Initial value
+static uint16_t crc16_ccitt_update(uint16_t crc, const uint8_t *data, size_t len) {
     while (len--) {
         uint8_t idx = (crc >> 8) ^ *data++;
         crc = (crc << 8) ^ crc16_table[idx];
@@ -161,14 +173,14 @@ static uint16_t crc16_ccitt_lut(const uint8_t *data, size_t len) {
 ```
 
 **CRC Calculation Scope:**
-- **Included**: All pixel data (Channel 2 + Channel 3)
+- **Included**: All pixel data (Channel 0 + 1 + 2 + 3)
 - **Excluded**: Frame header (magic, pixel counts)
-- **Performance**: ~5µs for 1000 pixels using lookup table
+- **Performance**: ~15µs for 1000 pixels × 4 channels using lookup table
 
 ### Error Detection & Recovery
 
 **Validation Process:**
-1. **Frame Reception**: ESP32-H2 receives complete frame via SPI
+1. **Frame Reception**: ESP32 WROOM receives complete frame via SPI
 2. **Header Check**: Validate magic number and pixel counts
 3. **CRC Verification**: Recompute CRC over payload data
 4. **Comparison**: Compare computed CRC with header value
@@ -180,12 +192,67 @@ if (computed_crc == header_crc) {
     process_frame_data();
     send_at_response("+LED_DONE");
 }
-// Error path  
+// Error path
 else {
     log_crc_error();
     send_at_response("+LED_ERROR:CRC_MISMATCH");
 }
 ```
+
+## NeoPixelBus LED Control
+
+Both the ESP32-C5 and ESP32 WROOM use the **NeoPixelBus library** for RMT-based LED strip control, not custom RMT implementations.
+
+### ESP32-C5 NeoPixelBus Configuration
+
+**Library Integration:**
+```cpp
+// NeoPixelBus manages RMT channels internally
+#include <NeoPixelBus.h>
+
+// WLED creates NeoPixelBus instances for configured channels
+// NeoPixelBus handles all RMT configuration, timing, and DMA automatically
+```
+
+**Key Features:**
+- **Automatic RMT Setup**: NeoPixelBus configures RMT channels at 40MHz
+- **WS2812/SK6812 Support**: Built-in timing templates for common protocols
+- **DMA Management**: Automatic DMA buffer allocation and management
+- **Multi-Channel**: Supports multiple independent RMT channels
+
+### ESP32 WROOM NeoPixelBus Configuration
+
+**Library Integration:**
+```cpp
+// WROOM firmware uses type-erased NeoPixelBus strip management
+// Strips allocated dynamically based on AT+LED_PREP parameters
+
+// Custom NeoPixelBus driver for ESP32 WROOM:
+// - NeoEsp32RmtNWs2812xMethod (RGB, 3 bytes/pixel)
+// - NeoEsp32RmtNSk6812Method (RGBW, 4 bytes/pixel)
+```
+
+**Key Features:**
+- **40MHz RMT Clock**: NeoPixelBus configures ESP32 RMT at 40MHz for precise timing
+- **Type-Erased Strips**: Memory-efficient management of 4 channels with different formats
+- **Dynamic Allocation**: Strips created/destroyed based on configuration changes
+- **Efficient Memory**: Only allocates buffers for active channels
+
+### NeoPixelBus Timing (WS2812)
+
+NeoPixelBus handles all WS2812/SK6812 timing internally:
+
+**40MHz RMT Configuration (both C5 and WROOM):**
+- **T0H**: 400ns (16 cycles × 25ns)
+- **T0L**: 850ns (34 cycles × 25ns)
+- **T1H**: 850ns (34 cycles × 25ns)
+- **T1L**: 450ns (18 cycles × 25ns)
+- **Reset**: 280µs minimum (handled by NeoPixelBus)
+
+**Timing Accuracy:**
+- **Resolution**: ±25ns (40MHz clock period)
+- **WS2812 Tolerance**: ±150ns typical
+- **Margin**: Well within specification
 
 ## Synchronization Timing
 
@@ -196,18 +263,18 @@ else {
 Event                           Timing      Cumulative
 ─────────────────────────────────────────────────────
 AT+LED_PREP command            ~100µs       100µs
-H2 SPI slave preparation       ~50µs        150µs  
-ParlIO frame transmission      ~100µs       250µs
-H2 CRC validation              ~5µs         255µs
-H2 RMT channel setup          ~10µs         265µs
-RMT transmission start         ~5µs         270µs
-+LED_DONE response            ~30µs         300µs
+WROOM SPI slave preparation    ~50µs        150µs
+ParlIO frame transmission      ~800µs       950µs (4 channels)
+WROOM CRC validation           ~15µs        965µs
+WROOM NeoPixelBus setup        ~20µs        985µs
+NeoPixelBus RMT start          ~10µs        995µs
++LED_DONE response             ~30µs        1025µs
 
-Total coordination latency: ~300µs typical
+Total coordination latency: ~1ms typical
 ```
 
 **Frame Rate Capability:**
-- **Maximum Theoretical**: 3,333 FPS (300µs cycle time)
+- **Maximum Theoretical**: 1000 FPS (1ms cycle time)
 - **Practical Limit**: 120 FPS (accounting for WLED processing)
 - **Recommended**: 60 FPS for optimal performance/power balance
 
@@ -217,117 +284,42 @@ Total coordination latency: ~300µs typical
 The ParlIO output is electrically compatible with SPI input, but requires careful timing:
 
 ```
-ParlIO (C5)           SPI Slave (H2)
-─────────────         ──────────────
+ParlIO (C5)           SPI Slave (WROOM)
+─────────────         ──────────────────
 CLK_OUT (80MHz)   →   SCLK (80MHz)
-DATA (Serial)     →   MOSI (8-bit)
-VALID (Frame)     →   CS (Active Low)
+DATA (Serial)     →   MOSI (Serial)
+VALID (Frame)     →   CS (Active High)
 ```
 
 **Critical Timing Requirements:**
-- **Clock Skew**: &lt;2ns between CLK and DATA signals
+- **Clock Skew**: <2ns between CLK and DATA signals
 - **Setup/Hold**: Meet SPI slave timing specifications
-- **CS Assertion**: Must precede data by &gt;50ns
+- **CS Assertion**: Must precede data by >50ns
 
-## Peripheral Configuration Deep Dive
+## Memory Architecture
 
-### ESP32-C5 RMT Configuration (Channels 0-1)
-
-**Local RMT Setup:**
-```cpp
-rmt_tx_channel_config_t tx_config = {
-    .clk_src = RMT_CLK_SRC_DEFAULT,        // 40MHz APB clock
-    .resolution_hz = 40000000,             // 40MHz = 25ns resolution
-    .mem_block_symbols = 48,               // 384 bytes per channel
-    .trans_queue_depth = 4,                // 4 pending transactions
-    .intr_priority = 3,                    // High interrupt priority
-    .flags.invert_out = false,             // Normal polarity
-    .flags.with_dma = true                 // Enable DMA
-};
-```
-
-**WS2812 Timing (40MHz Base):**
-```cpp
-// Timing specifications for WS2812 protocol
-rmt_bytes_encoder_config_t encoder_config = {
-    .bit0 = {
-        .duration0 = 16,    // T0H: 400ns (16 × 25ns)
-        .level0 = 1,        // High level
-        .duration1 = 34,    // T0L: 850ns (34 × 25ns)  
-        .level1 = 0         // Low level
-    },
-    .bit1 = {
-        .duration0 = 34,    // T1H: 850ns (34 × 25ns)
-        .level0 = 1,        // High level
-        .duration1 = 18,    // T1L: 450ns (18 × 25ns)
-        .level1 = 0         // Low level
-    },
-    .flags.msb_first = false  // LSB first for WS2812
-};
-```
-
-### ESP32-H2 RMT Configuration (Channels 2-3)
-
-**Remote RMT Setup:**
-```cpp
-rmt_tx_channel_config_t tx_config = {
-    .clk_src = RMT_CLK_SRC_DEFAULT,        // 32MHz APB clock
-    .resolution_hz = 32000000,             // 32MHz = 31.25ns resolution
-    .mem_block_symbols = 48,               // 384 bytes per channel
-    .trans_queue_depth = 8,                // 8 pending transactions
-    .intr_priority = 3,                    // High interrupt priority
-    .flags.invert_out = false              // Normal polarity
-};
-```
-
-**WS2812 Timing (32MHz Base):**
-```cpp
-// Adjusted timing for 32MHz clock
-rmt_bytes_encoder_config_t encoder_config = {
-    .bit0 = {
-        .duration0 = 10,    // T0H: 312.5ns (10 × 31.25ns) 
-        .level0 = 1,
-        .duration1 = 29,    // T0L: 906.25ns (29 × 31.25ns)
-        .level1 = 0
-    },
-    .bit1 = {
-        .duration0 = 29,    // T1H: 906.25ns (29 × 31.25ns)
-        .level0 = 1, 
-        .duration1 = 10,    // T1L: 312.5ns (10 × 31.25ns)
-        .level1 = 0
-    }
-};
-```
-
-**Clock Frequency Implications:**
-- **C5 (40MHz)**: ±12.5ns timing accuracy
-- **H2 (32MHz)**: ±15.625ns timing accuracy  
-- **WS2812 Tolerance**: ±150ns typical
-- **Impact**: Both configurations well within tolerance
-
-### Memory Architecture
-
-**Buffer Allocation Strategy:**
+### Buffer Allocation Strategy
 
 ```cpp
-// ESP32-C5 Memory Usage
-WLED pixel buffers:     8KB    (4 channels × 1000 pixels × 4 bytes ÷ 2)
-ParlIO frame buffer:    8KB    (DMA-capable, cache-aligned)
-RMT symbol buffers:     1.5KB  (2 channels × 48 symbols × 16 bytes)
+// ESP32-C5 Memory Usage (WLED + ParlIO)
+WLED pixel buffers:     16KB   (4 channels × 1000 pixels × 4 bytes)
+ParlIO frame buffer:    16KB   (DMA-capable, cache-aligned)
+NeoPixelBus RMT:        Auto   (Managed by library)
 AT command buffers:     2KB    (UART RX/TX queues)
-Total C5 LED memory:   ~19.5KB
+Total C5 LED memory:   ~34KB
 
-// ESP32-H2 Memory Usage  
-SPI RX buffers:        64KB    (8 × 8KB circular buffer)
-RMT symbol buffers:   768B     (2 channels × 48 symbols × 8 bytes)
-Frame processing:      8KB     (working copy)
+// ESP32 WROOM Memory Usage
+SPI RX buffers:        128KB   (8 × 16KB circular buffer)
+NeoPixelBus RMT:       Auto    (Managed by library, per-channel)
+Frame processing:      16KB    (working copy)
 AT response buffers:   1KB     (UART TX queue)
-Total H2 LED memory:  ~74KB
+Total WROOM LED memory: ~145KB
 ```
 
 **DMA Requirements:**
-- **C5**: ParlIO and RMT require DMA-capable buffers (MALLOC_CAP_DMA)
-- **H2**: SPI slave uses automatic DMA with pre-allocated descriptors
+- **C5**: ParlIO requires DMA-capable buffers (MALLOC_CAP_DMA)
+- **WROOM**: SPI slave uses automatic DMA with pre-allocated descriptors
+- **NeoPixelBus**: Library handles RMT DMA buffer allocation internally
 - **Cache Coherency**: ESP-IDF handles cache invalidation automatically
 - **Alignment**: 64-byte alignment recommended for optimal DMA performance
 
@@ -339,33 +331,34 @@ Total H2 LED memory:  ~74KB
 ```
 Theoretical: 80 MHz × 1 bit = 80 Mbps = 10 MB/s
 Effective:   ~90% efficiency = 9 MB/s (protocol overhead)
-Frame size:  8008 bytes maximum
-Frame time:  8008 ÷ 9,000,000 = 890µs maximum
-Typical:     800 pixels = 3208 bytes = 356µs
+Frame size:  16012 bytes maximum (4 channels × 1000 pixels)
+Frame time:  16012 ÷ 9,000,000 = 1.78ms maximum
+Typical:     800 pixels/ch = 12812 bytes = 1.42ms
 ```
 
 **System Bottlenecks:**
-1. **AT Command Latency**: ~100µs (UART communication)
+1. **AT Command Latency**: ~100µs (UART communication at 921.6 kbaud)
 2. **WLED Rendering**: Variable (effect complexity dependent)
-3. **Frame Validation**: ~5µs (CRC calculation)
-4. **RMT Setup**: ~15µs (encoder initialization)
+3. **Frame Validation**: ~15µs (CRC calculation)
+4. **NeoPixelBus Setup**: ~20µs (library initialization)
 
 ### CPU Utilization
 
-**ESP32-C5 Load (60 FPS, 1000 pixels):**
+**ESP32-C5 Load (60 FPS, 1000 pixels/channel):**
 - **WLED Effects**: 15-30% (effect dependent)
-- **Frame Creation**: 2% (memory copy + CRC)
-- **ParlIO Management**: &lt;1% (DMA-based)
-- **AT Commands**: &lt;1% (queued processing)
-- **Total**: 18-33% typical
+- **Frame Creation**: 3% (memory copy + CRC)
+- **ParlIO Management**: <1% (DMA-based)
+- **AT Commands**: <1% (queued processing)
+- **NeoPixelBus**: <2% (library overhead)
+- **Total**: 19-36% typical
 
-**ESP32-H2 Load (60 FPS, 1000 pixels):**
-- **SPI Reception**: &lt;1% (DMA-based)
-- **Frame Processing**: 3% (validation + splitting)
-- **RMT Transmission**: 5% (encoder overhead)  
-- **AT Processing**: &lt;1% (simple commands)
+**ESP32 WROOM Load (60 FPS, 1000 pixels/channel):**
+- **SPI Reception**: <1% (DMA-based)
+- **Frame Processing**: 5% (validation + splitting)
+- **NeoPixelBus**: 8% (library + RMT management)
+- **AT Processing**: <1% (simple commands)
 - **BLE Stack**: 5-10% (connection dependent)
-- **Total**: 9-15% typical
+- **Total**: 14-24% typical
 
 ## Error Handling & Recovery
 
@@ -378,9 +371,9 @@ Typical:     800 pixels = 3208 bytes = 356µs
 - **Timeout**: Frame reception incomplete, partial frame discarded
 
 **System-Level Errors:**
-- **H2 Unresponsive**: AT command timeout, fallback to local mode
-- **SPI Hardware Fault**: Bus reset and reinitialization  
-- **RMT Channel Fault**: Channel reset and reconfiguration
+- **WROOM Unresponsive**: AT command timeout, fallback to local mode
+- **SPI Hardware Fault**: Bus reset and reinitialization
+- **NeoPixelBus Fault**: Library error, channel reset and reconfiguration
 - **Memory Exhaustion**: Buffer allocation failure, reduced frame size
 
 ### Recovery Mechanisms
@@ -390,33 +383,33 @@ Typical:     800 pixels = 3208 bytes = 356µs
 // Error counter and recovery logic
 typedef struct {
     uint32_t crc_errors;           // CRC validation failures
-    uint32_t timeout_errors;       // AT command timeouts  
-    uint32_t hardware_errors;      // SPI/RMT hardware faults
+    uint32_t timeout_errors;       // AT command timeouts
+    uint32_t hardware_errors;      // SPI/NeoPixelBus faults
     uint32_t consecutive_errors;   // Consecutive error count
     bool fallback_mode;            // Emergency fallback active
 } error_counters_t;
 
 void handle_communication_error(error_type_t error) {
     counters.consecutive_errors++;
-    
+
     if (counters.consecutive_errors > MAX_CONSECUTIVE_ERRORS) {
         ESP_LOGW(TAG, "Too many errors, enabling fallback mode");
         counters.fallback_mode = true;
-        disable_h2_communication();
+        disable_wroom_communication();
     }
-    
+
     // Attempt recovery every 10th error
     if (counters.consecutive_errors % 10 == 0) {
-        attempt_h2_recovery();
+        attempt_wroom_recovery();
     }
 }
 ```
 
 **Fallback Operation:**
-When ESP32-H2 communication fails, the system can operate in fallback mode:
-- **Channels 0-1**: Continue normal local RMT operation
-- **Channels 2-3**: Disabled or remapped to available local channels
-- **Performance**: Reduced to 2-channel operation
+When ESP32 WROOM communication fails, the system can operate in fallback mode:
+- **All Channels**: C5 can drive local channels via NeoPixelBus if configured
+- **WROOM Channels**: Disabled until communication restored
+- **Performance**: Depends on local channel configuration
 - **Recovery**: Automatic retry every 30 seconds
 
-This comprehensive frame protocol ensures reliable, high-performance LED control across the distributed dual-MCU architecture while maintaining compatibility with standard WS2812/SK6812 LED strips.
+This comprehensive frame protocol ensures reliable, high-performance LED control across the distributed dual-MCU architecture while leveraging the proven NeoPixelBus library for WS2812/SK6812 LED strip compatibility.
