@@ -99,13 +99,12 @@ parlio_tx_unit_config_t config = {
 };
 ```
 
-**GPIO Assignments:**
+**GPIO Assignments (configurable via PINS structure):**
 ```cpp
-parlio_tx_gpio_config_t gpio_config = {
-    .clk_out_pin = PINS.spi.sclk,  // GPIO 23: 30MHz clock to ESP32 WROOM
-    .valid_pin = PINS.spi.cs,      // GPIO 28: Frame valid signal (active high)
-    .data_pins = {PINS.spi.mosi}   // GPIO 8: Serial data
-};
+// ParlIO pins are defined via C5_PARLIO_* macros or PINS structure
+config.clk_out_gpio_num = C5_PARLIO_CLK_OUT_PIN;   // Clock to WROOM
+config.valid_gpio_num = C5_PARLIO_VALID_PIN;       // Frame valid signal
+// Data pin assigned via data_gpio array
 ```
 
 ### ParlIO Timing Characteristics
@@ -128,26 +127,26 @@ The ESP32 WROOM receives the ParlIO stream via SPI slave interface:
 
 ```cpp
 spi_bus_config_t buscfg = {
-    .mosi_io_num = PINS.spis.mosi,       // GPIO 23: Data from C5 GPIO 8
-    .sclk_io_num = PINS.spis.sck,        // GPIO 18: Clock from C5 GPIO 23
-    .max_transfer_sz = 16012,            // Maximum frame size (4 channels)
-    .flags = SPICOMMON_BUSFLAG_MASTER |
-             SPICOMMON_BUSFLAG_SLAVE     // Dual-mode capability
+    .mosi_io_num = PINS.spis.mosi,       // Data from C5 (configurable)
+    .sclk_io_num = PINS.spis.sck,        // Clock from C5 (configurable)
+    .max_transfer_sz = SPI_LED_MAX_SEGMENT, // Maximum frame size
+    .flags = SPICOMMON_BUSFLAG_SLAVE,    // Slave mode
+    .intr_flags = ESP_INTR_FLAG_IRAM     // IRAM interrupt handler
 };
 
 spi_slave_interface_config_t slvcfg = {
     .mode = 0,                           // CPOL=0, CPHA=0
-    .spics_io_num = PINS.spis.cs,        // GPIO 5: Valid/CS from C5 GPIO 28
-    .queue_size = 8,                     // 8 transaction queue depth
-    .flags = SPI_SLAVE_BIT_LSBFIRST      // LSB first reception
+    .spics_io_num = PINS.spis.cs,        // Valid/CS from C5 (configurable)
+    .queue_size = 7,                     // 7 transaction queue depth
+    .flags = 0                           // MSB first reception (default)
 };
 ```
 
 **SPI Reception Strategy:**
-- **Pre-allocated Buffers**: 8 × 16KB DMA-capable buffers
+- **Pre-allocated Buffers**: DMA-capable buffers (queue depth 7)
 - **Circular Queuing**: Automatic re-queuing after processing
 - **Zero-Copy Operation**: Direct DMA to processing buffers
-- **Interrupt-Driven**: Minimal CPU overhead during reception
+- **Polling-Based**: Uses `spi_slave_get_trans_result()` with timeout
 
 ## CRC Validation
 
@@ -284,11 +283,11 @@ Total coordination latency: ~1ms typical
 The ParlIO output is electrically compatible with SPI input, but requires careful timing:
 
 ```
-ParlIO (C5)           SPI Slave (WROOM)
-─────────────         ──────────────────
-CLK_OUT (30MHz)   →   SCLK (30MHz)
-DATA (Serial)     →   MOSI (Serial)
-VALID (Frame)     →   CS (Active High)
+ParlIO (C5)                 SPI Slave (WROOM)
+───────────────             ──────────────────
+CLK_OUT (30MHz)         →   SCLK (30MHz)
+DATA0 (Serial)          →   MOSI (Serial)
+VALID (Frame active)    →   CS (Active when frame valid)
 ```
 
 **Critical Timing Requirements:**
@@ -413,3 +412,22 @@ When ESP32 WROOM communication fails, the system can operate in fallback mode:
 - **Recovery**: Automatic retry every 30 seconds
 
 This comprehensive frame protocol ensures reliable, high-performance LED control across the distributed dual-MCU architecture while leveraging the proven NeoPixelBus library for WS2812/SK6812 LED strip compatibility.
+
+## Source Code References
+
+The frame protocol implementation spans both firmware projects:
+
+| Component | File | Description |
+|-----------|------|-------------|
+| **Frame Header (C5)** | `NeoEsp32ParlC5SharedManager.h` | `led_frame_header_t` struct, `LED_FRAME_MAGIC`, CRC16 table |
+| **Frame Header (WROOM)** | `spi_led_controller.h` | `led_frame_header_t` struct, `LED_MAX_PIXELS_PER_CHANNEL` |
+| **ParlIO TX Config** | `NeoEsp32ParlC5SharedManager.h` | `C5_PARLIO_BITRATE_HZ`, ParlIO unit initialization |
+| **SPI Slave Config** | `spi_led_controller.cpp` | `led_controller_init()` function |
+| **CRC16 Implementation** | `NeoEsp32ParlC5SharedManager.h` | `crc16_ccitt_update()` function, lookup table |
+| **Pin Configuration** | `pins/pins.c` | Board-specific GPIO assignments via `PINS` structure |
+
+**Key Constants:**
+- `LED_FRAME_MAGIC = 0x4C45` - Frame synchronization marker ("LE")
+- `C5_PARLIO_BITRATE_HZ = 30000000` - 30MHz ParlIO clock
+- `LED_MAX_PIXELS_PER_CHANNEL = 1000` (C5) / `1200` (WROOM) - Per-channel pixel limits
+- `QUEUE_SIZE = 7` - SPI slave transaction queue depth

@@ -1,11 +1,11 @@
 ---
 title: "AT Command Protocol"
-description: "Inter-MCU communication protocol for ESP32-C5 and ESP32-H2 coordination"
+description: "Inter-MCU communication protocol for ESP32-C5 and ESP32 WROOM coordination"
 ---
 
 # AT Command Protocol
 
-The AT Command Protocol serves as the primary communication mechanism between the ESP32-C5 (master) and ESP32-H2 (slave) in the Watts v3 dual-MCU lighting system. This protocol enables configuration synchronization, LED frame coordination, BLE management, and firmware updates.
+The AT Command Protocol serves as the primary communication mechanism between the ESP32-C5 (master) and ESP32 WROOM (slave) in the Watts v3 dual-MCU lighting system. This protocol enables configuration synchronization, LED frame coordination, BLE management, and firmware updates.
 
 ## Protocol Architecture
 
@@ -17,13 +17,13 @@ The AT Command Protocol serves as the primary communication mechanism between th
 
 ### Message Types
 
-#### 1. AT Commands (C5 → H2)
+#### 1. AT Commands (C5 → WROOM)
 Standard AT command format sent by the master controller:
 ```
 AT+COMMAND[=param1[,param2[,...]]]
 ```
 
-#### 2. Responses (H2 → C5)  
+#### 2. Responses (WROOM → C5)
 Standard response patterns from the slave device:
 ```
 OK              # Success
@@ -31,10 +31,10 @@ ERROR           # Command failed
 +DATA:value     # Data response
 ```
 
-#### 3. Unsolicited Result Codes - URCs (H2 → C5)
+#### 3. Unsolicited Result Codes - URCs (WROOM → C5)
 Asynchronous notifications from slave to master:
 ```
-+LED_DONE:frame_id      # Frame processing complete
++LED_DONE               # Frame processing complete
 +BLEGATTSRECV:data      # BLE data received
 +ERROR:code             # Error notification
 ```
@@ -45,28 +45,35 @@ Asynchronous notifications from slave to master:
 The most critical protocol operation coordinates LED frame rendering across both MCUs:
 
 ```
-ESP32-C5 (Master)           ESP32-H2 (Slave)
-        |                           |
-        |  AT+LED_PREP=500,300      |
-        |-------------------------->|
-        |                           | (SPI slave ready)
-        |         OK                |
-        |<--------------------------|
-        |                           |
-        | [30MHz ParlIO stream]     |
-        |=========================> | (Frame data via SPI)
-        |                           |
-        |      +LED_DONE:123        |
-        |<--------------------------|
-        |                           |
-     (Frame 123 complete on both MCUs)
+ESP32-C5 (Master)                           ESP32 WROOM (Slave)
+        |                                           |
+        |  AT+LED_PREP=<8 parameters>               |
+        |------------------------------------------>|
+        |                                           | (SPI slave ready)
+        |              OK                           |
+        |<------------------------------------------|
+        |                                           |
+        |       [30MHz ParlIO stream]               |
+        |===========================================>| (Frame data via SPI)
+        |                                           |
+        |             +LED_DONE                     |
+        |<------------------------------------------|
+        |                                           |
+          (Frame complete, LEDs updated on WROOM)
 ```
+
+**AT+LED_PREP Parameter Format:**
+```
+AT+LED_PREP=<ch0_px>,<ch1_px>,<ch2_px>,<ch3_px>,<ch0_fmt>,<ch1_fmt>,<ch2_fmt>,<ch3_fmt>
+```
+- `chX_px`: Pixel count for channel X (0-1000)
+- `chX_fmt`: Format for channel X (3=RGB, 4=RGBW, 0=disabled)
 
 ### BLE Configuration Flow
 BLE setup and management through AT commands:
 
 ```
-ESP32-C5 (Master)           ESP32-H2 (Slave)
+ESP32-C5 (Master)           ESP32 WROOM (Slave)
         |                           |
         |    AT+BLEINIT=2           |
         |-------------------------->|
@@ -161,21 +168,27 @@ if (ATHost_waitLedDone(50)) {
 }
 ```
 
-### H2 Implementation (Tiny-CAT)
+### WROOM Implementation (Tiny-CAT)
 ```c
-// Command handler registration
-at_cmd_t led_prep_cmd = {
-    .name = "LED_PREP",
-    .run = at_cmd_led_prep_spi,
-    .set = at_cmd_led_prep_spi
+// Command handler registration in at_led_commands.c
+static struct cat_command spi_led_at_commands[] = {
+  {
+    .name = "+LED_PREP",
+    .description = "Prepare LED frame: +LED_PREP=<ch0_px>,<ch1_px>,...",
+    .write = at_cmd_led_prep_spi,
+    .disable = false
+  }
 };
 ```
 
 ### WLED Integration
 The protocol integrates seamlessly with WLED through the NeoPixelBus framework:
 ```cpp
-// Automatic AT command integration
-snprintf(cmd, sizeof(cmd), "AT+LED_PREP=%d,%d", ch2_pixels, ch3_pixels);
+// AT command generation with 8-parameter format
+// ch0-ch3 pixel counts + ch0-ch3 formats (3=RGB, 4=RGBW, 0=disabled)
+snprintf(cmd, sizeof(cmd), "AT+LED_PREP=%d,%d,%d,%d,%d,%d,%d,%d",
+         ch0_px, ch1_px, ch2_px, ch3_px,
+         ch0_fmt, ch1_fmt, ch2_fmt, ch3_fmt);
 ATHost_sendATWaitOK(cmd, 100);
 ```
 
@@ -190,6 +203,15 @@ The AT command framework supports easy extension for new functionality:
 
 This extensible design allows the protocol to grow with system requirements while maintaining backward compatibility and performance characteristics.
 
+## Source Code References
+
+| Component | File | Description |
+|-----------|------|-------------|
+| **AT LED Commands** | `at_led_commands.c` | `at_cmd_led_prep_spi()` handler, command registration |
+| **AT LED Header** | `at_led_commands.h` | `at_led_init()`, `at_led_deinit()` interfaces |
+| **Tiny-CAT Framework** | `cat.c`, `cat.h` | AT command parser and dispatcher |
+| **UART Configuration** | `EspAt_firmware.c` | UART initialization, baud rate setup |
+
 ## Next Steps
 
-For detailed command syntax and parameters, see the [AT Command API Reference](/api-reference/at-commands/overview). For implementation examples, refer to the ESP32-C5 and ESP32-H2 specific firmware documentation.
+For detailed command syntax and parameters, see the [AT Command API Reference](/api-reference/at-commands/overview). For implementation examples, refer to the ESP32-C5 and ESP32 WROOM specific firmware documentation.
