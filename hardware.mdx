@@ -317,9 +317,9 @@ The power board enables WLED to automatically detect LED types based on current 
 1. Set all pixels to known color (e.g., white)
 2. Sample current on all 4 channels
 3. Classify based on current draw:
-   - High current (>500mA) → RGBW strip detected
+   - High current (&gt;500mA) → RGBW strip detected
    - Medium current (200-500mA) → RGB strip detected
-   - Low current (<200mA) → No strip or disconnected
+   - Low current (&lt;200mA) → No strip or disconnected
 4. Configure NeoPixelBus instances accordingly
 
 See [power-board.mdx](power-board.mdx) for complete API reference and usage examples.
