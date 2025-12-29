@@ -586,10 +586,10 @@ void _allocateH2Buffer() {
 
 | Operation | Timing | Description |
 |-----------|---------|------------|
-| **AT+LED_PREP** | <1ms | WROOM configuration command (only on channel changes) |
-| **WROOM READY Wait** | <300ms | GPIO handshake timeout |
+| **AT+LED_PREP** | &lt;1ms | WROOM configuration command (only on channel changes) |
+| **WROOM READY Wait** | &lt;300ms | GPIO handshake timeout |
 | **ParlIO Transmission** | ~4.3ms | 16KB frame @ 30MHz (worst case) |
-| **WROOM DONE Wait** | <3000ms | WROOM processing + RMT output timeout |
+| **WROOM DONE Wait** | &lt;3000ms | WROOM processing + RMT output timeout |
 | **Frame Rate** | ~60 FPS | Typical with 1000 pixels across 4 channels |
 
 ### Bandwidth Calculation
