@@ -7,18 +7,33 @@ description: "Complete guide to the ESP32 WROOM secondary controller with AT fir
 
 The ESP32 WROOM serves as the secondary controller in the Watts v3 dual-MCU system, providing BLE connectivity and distributed LED control while communicating with the ESP32-C5 via AT commands over UART.
 
+## Source Code Reference
+
+| Component | File | Description |
+|-----------|------|-------------|
+| **Main Firmware** | [EspAt_firmware.c](src/ESP32%20Wroom%20LED%20Driver%20firmware/main/EspAt_firmware.c) | Application entry, UART setup, task creation |
+| **AT Parser** | [cat.h](src/ESP32%20Wroom%20LED%20Driver%20firmware/main/cat.h) / [cat.c](src/ESP32%20Wroom%20LED%20Driver%20firmware/main/cat.c) | Tiny-CAT AT command framework |
+| **BLE Handler** | [ble_at_handler.c](src/ESP32%20Wroom%20LED%20Driver%20firmware/main/ble_at_handler.c) | BLE AT command implementations |
+| **GATT Services** | [gatt_svc.h](src/ESP32%20Wroom%20LED%20Driver%20firmware/main/gatt_svc.h) / [gatt_svc.c](src/ESP32%20Wroom%20LED%20Driver%20firmware/main/gatt_svc.c) | Dynamic GATT service management |
+| **GAP** | [gap.c](src/ESP32%20Wroom%20LED%20Driver%20firmware/main/gap.c) | GAP advertising/connection |
+| **LED Commands** | [at_led_commands.c](src/ESP32%20Wroom%20LED%20Driver%20firmware/main/at_led_commands.c) | LED AT command handlers |
+| **OTA** | [ota.c](src/ESP32%20Wroom%20LED%20Driver%20firmware/main/ota.c) / [ota.h](src/ESP32%20Wroom%20LED%20Driver%20firmware/main/ota.h) | Over-the-air update support |
+| **Pin Mapping** | [pins.h](src/Watts-ESP-IDF-C5/components/pins/include/pins/pins.h) | Shared pin definitions |
+
+**Target:** ESP32 (classic WROOM module) - `CONFIG_IDF_TARGET="esp32"` ([sdkconfig.defaults:255](src/ESP32%20Wroom%20LED%20Driver%20firmware/sdkconfig.defaults#L255))
+
 ## Architecture Overview
 
-The ESP32-H2 firmware implements a multi-subsystem architecture:
+The ESP32 WROOM firmware implements a multi-subsystem architecture:
 
 ```
 ┌─────────────────────────────────────────────────────────────┐
-│                     ESP32-H2 Secondary                      │
+│                    ESP32 WROOM Secondary                    │
 ├─────────────────────────────────────────────────────────────┤
 │  ┌─────────────────┐  ┌─────────────────┐                  │
 │  │   Tiny-CAT      │  │   NimBLE Stack  │                  │
 │  │   AT Parser     │  │   BLE Services  │                  │
-│  │   (UART 5Mbps)  │  │   GAP/GATT      │                  │
+│  │   (921.6 kbaud) │  │   GAP/GATT      │                  │
 │  └─────────┬───────┘  └─────────┬───────┘                  │
 │            │                    │                          │
 │  ┌─────────▼────────────────────▼───────┐                  │
@@ -30,7 +45,7 @@ The ESP32-H2 firmware implements a multi-subsystem architecture:
 │            │                                               │
 │  ┌─────────▼─────────────────┐  ┌─────────────────────────┐ │
 │  │   SPI Slave LED Controller │  │  RMT LED Output        │ │
-│  │   • Frame Reception        │  │  • Channels 2-3        │ │
+│  │   • Frame Reception        │  │  • 4 Channels          │ │
 │  │   • CRC Validation         │  │  • WS2812 Protocol     │ │
 │  │   • 30MHz Data Stream      │  │  • Synchronized Output │ │
 │  └─────────────────────────────┘  └─────────────────────────┘ │
@@ -41,7 +56,9 @@ The ESP32-H2 firmware implements a multi-subsystem architecture:
 
 ### Tiny-CAT Framework
 
-The ESP32-H2 firmware is built around the Tiny-CAT AT command parser, providing a robust and extensible command interface:
+**Source:** [cat.h](src/ESP32%20Wroom%20LED%20Driver%20firmware/main/cat.h) | [cat.c](src/ESP32%20Wroom%20LED%20Driver%20firmware/main/cat.c)
+
+The ESP32 WROOM firmware is built around the Tiny-CAT AT command parser, providing a robust and extensible command interface:
 
 ```cpp
 // File: main/cat.h - Core framework structure
@@ -97,7 +114,7 @@ void app_main(void) {
     nimble_port_init();
     
     // 6. Start AT command processing task
-    xTaskCreate(cat_task, "cat_task", 8*1024, NULL, 6, NULL);
+    xTaskCreatePinnedToCore(cat_task, "cat_task", 4096, NULL, 6, NULL, 1);
     
     // 7. Validate OTA boot state
     verify_running_partition();
@@ -108,7 +125,7 @@ void app_main(void) {
 
 **Primary Tasks:**
 
-1. **cat_task** (Priority 6, 8KB stack):
+1. **cat_task** (Priority 6, 4KB stack, pinned to Core 1):
    ```cpp
    void cat_task(void *arg) {
        while (1) {
@@ -255,9 +272,11 @@ This automatic state reporting allows the C5 to detect WROOM reboots and automat
 
 ### NimBLE Integration
 
+**Source:** [ble_at_handler.c](src/ESP32%20Wroom%20LED%20Driver%20firmware/main/ble_at_handler.c) | [gatt_svc.c](src/ESP32%20Wroom%20LED%20Driver%20firmware/main/gatt_svc.c) | [gap.c](src/ESP32%20Wroom%20LED%20Driver%20firmware/main/gap.c)
+
 **Initialization Flow:**
 ```cpp
-// File: main/ble_at_handler.c
+// File: main/ble_at_handler.c - Line 281
 static bool ble_initialized = false;
 
 cat_return_state at_cmd_bleinit(const struct cat_command *cmd,
@@ -293,9 +312,11 @@ cat_return_state at_cmd_bleinit(const struct cat_command *cmd,
 
 ### Dynamic GATT Service Management
 
+**Source:** [gatt_svc.h](src/ESP32%20Wroom%20LED%20Driver%20firmware/main/gatt_svc.h) | [gatt_svc.c](src/ESP32%20Wroom%20LED%20Driver%20firmware/main/gatt_svc.c)
+
 **Service Table Structure:**
 ```cpp
-// File: main/gatt_svc.c
+// File: main/gatt_svc.h - Lines 18-43
 typedef struct {
     struct ble_gatt_svc_def *svc_def;   // NimBLE service definition
     struct ble_gatt_chr_def *chr_defs;  // Characteristic definitions
@@ -319,8 +340,8 @@ typedef struct {
 } dynamic_char_entry_t;
 
 // Global tables: 10 services × 10 characteristics = 100 total
-static dynamic_service_entry_t service_table[MAX_SERVICES];
-static dynamic_char_entry_t char_table[MAX_SERVICES][MAX_CHARACTERISTICS];
+static dynamic_service_entry_t service_table[MAX_SERVICES];      // MAX_SERVICES = 10
+static dynamic_char_entry_t char_table[MAX_SERVICES][MAX_CHARS_PER_SVC];  // MAX_CHARS_PER_SVC = 10
 ```
 
 **Service Creation Example:**
@@ -875,36 +896,63 @@ void register_all_commands() {
 **File**: `main/at_led_commands.c`
 
 **AT+LED_PREP Implementation:**
+
+**Source:** [at_led_commands.c:176-233](src/ESP32%20Wroom%20LED%20Driver%20firmware/main/at_led_commands.c#L176-L233)
+
+**Command Format:** `AT+LED_PREP=<ch0_px>,<ch1_px>,<ch2_px>,<ch3_px>,<ch0_fmt>,<ch1_fmt>,<ch2_fmt>,<ch3_fmt>`
+
+Where:
+- `chX_px`: Pixel count for channel X (0-1200)
+- `chX_fmt`: Format for channel X (3=RGB, 4=RGBW, 0=disabled)
+
 ```cpp
 static cat_return_state at_cmd_led_prep_spi(const struct cat_command *cmd,
                                              const uint8_t *data,
                                              size_t size, size_t args_num) {
-    // Parse comma-separated pixel counts
-    uint16_t values[2];
-    size_t parsed_count;
-    if (!parse_led_integers(data, size, values, 2, &parsed_count) || parsed_count != 2) {
-        return CAT_RETURN_STATE_ERROR;
+    // Parse 8 values: ch0_px, ch1_px, ch2_px, ch3_px, ch0_fmt, ch1_fmt, ch2_fmt, ch3_fmt
+    uint16_t vals[8];
+    size_t n;
+    if (!parse_led_integers(data, size, vals, 8, &n) || n != 8) {
+        send_at_response("ERROR");
+        return CAT_RETURN_STATE_OK;
     }
     
-    uint16_t ch2_pixels = values[0];
-    uint16_t ch3_pixels = values[1];
-    
-    // Validate pixel counts
-    if (ch2_pixels > MAX_PIXELS_PER_CHANNEL || ch3_pixels > MAX_PIXELS_PER_CHANNEL) {
-        ESP_LOGW(TAG, "Invalid pixel counts: ch2=%d, ch3=%d", ch2_pixels, ch3_pixels);
-        return CAT_RETURN_STATE_ERROR;
+    // Validate pixel counts (max 1200 per channel)
+    for (int i = 0; i < 4; i++) {
+        if (vals[i] > LED_MAX_PIXELS_PER_CHANNEL) {
+            send_at_response("ERROR");
+            return CAT_RETURN_STATE_ERROR;
+        }
     }
-    
-    // Start LED controller reception
-    led_controller_err_t err = led_controller_start_receive(
-        g_spi_led_controller, ch2_pixels, ch3_pixels);
-    
-    if (err != LED_CONTROLLER_OK) {
-        ESP_LOGE(TAG, "Failed to start LED reception: %d", err);
-        return CAT_RETURN_STATE_ERROR;
+
+    // Validate formats (3=RGB, 4=RGBW, 0=disabled)
+    for (int i = 4; i < 8; i++) {
+        uint16_t pixel_count = vals[i-4];
+        uint16_t format = vals[i];
+        if (pixel_count > 0 && format != 3 && format != 4) {
+            send_at_response("ERROR");
+            return CAT_RETURN_STATE_ERROR;
+        }
     }
-    
-    ESP_LOGI(TAG, "LED controller prepared: ch2=%d, ch3=%d", ch2_pixels, ch3_pixels);
+
+    // Prepare channel buffers and start reception
+    uint16_t pixels[4] = {vals[0], vals[1], vals[2], vals[3]};
+    uint8_t formats[4] = {(uint8_t)vals[4], (uint8_t)vals[5], (uint8_t)vals[6], (uint8_t)vals[7]};
+
+    if (led_controller_prepare_buffers(g_spi_led_controller, pixels, formats) != LED_ERR_OK)
+        return CAT_RETURN_STATE_ERROR;
+
+    if (led_controller_start_receive(g_spi_led_controller,
+                                     vals[0], vals[1], vals[2], vals[3]) != LED_ERR_OK)
+        return CAT_RETURN_STATE_ERROR;
+
+    write_to_at_console("OK\r\n");
+
+    // Mark system as initialized after successful LED_PREP
+    if (!h2_system_initialized) {
+        h2_system_initialized = true;
+        write_to_at_console("+H2_ALIVE:1\r\n");
+    }
     return CAT_RETURN_STATE_OK;
 }
 ```
@@ -1056,8 +1104,8 @@ ota_data,   data, ota,     0x490000,0x2000,
 ### Build Commands
 
 ```bash
-# Configure for ESP32-H2
-idf.py set-target esp32h2
+# Configure for ESP32 (WROOM)
+idf.py set-target esp32
 
 # Configure project
 idf.py menuconfig
