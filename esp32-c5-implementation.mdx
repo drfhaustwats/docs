@@ -7,6 +7,16 @@ description: "Complete guide to the ESP32-C5 main controller implementation with
 
 The ESP32-C5 serves as the main controller in the Watts v3 dual-MCU system, running WLED with a custom NeoPixelBus driver that distributes all four LED channels to an ESP32 WROOM module via high-speed ParlIO.
 
+**Source Code Location:** [src/Watts-ESP-IDF-C5/](src/Watts-ESP-IDF-C5/)
+
+| Component | Source File |
+|-----------|-------------|
+| Shared Manager | [components/NeoPixelBus/src/internal/methods/NeoEsp32ParlC5SharedManager.h](src/Watts-ESP-IDF-C5/components/NeoPixelBus/src/internal/methods/NeoEsp32ParlC5SharedManager.h) |
+| Channel Methods | [components/NeoPixelBus/src/internal/methods/NeoEsp32ParlC5X4Methods.h](src/Watts-ESP-IDF-C5/components/NeoPixelBus/src/internal/methods/NeoEsp32ParlC5X4Methods.h) |
+| Bus Wrapper | [components/wled/bus_wrapper.h](src/Watts-ESP-IDF-C5/components/wled/bus_wrapper.h) |
+| LightPipe State | [components/wled/lightpipe_state.h](src/Watts-ESP-IDF-C5/components/wled/lightpipe_state.h) |
+| Pin Definitions | [components/pins/pins.c](src/Watts-ESP-IDF-C5/components/pins/pins.c) |
+
 ## Architecture Overview
 
 The ESP32-C5 implementation uses a **fully distributed** architecture where all LED channels are transmitted to the ESP32 WROOM for output:
@@ -726,6 +736,8 @@ parlio_tx_gpio_config_t gpio_config = {
 ```
 
 ### GPIO Pin Assignments
+
+**Source:** [sdkconfig.defaults](src/Watts-ESP-IDF-C5/sdkconfig.defaults), [pins.c](src/Watts-ESP-IDF-C5/components/pins/pins.c)
 
 | Pin | Function | Direction | Description |
 |-----|----------|-----------|-------------|
